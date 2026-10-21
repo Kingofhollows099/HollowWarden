@@ -47,11 +47,26 @@ NONCE_COOKIE_NAME = "__Host-hw_nonce"
 OAUTH_STATE_LIFETIME_SECONDS = 600
 CLIENT_IP_KEY = "hollowwarden.clientIp"
 
+# The Clipboard Cleaner theme: dark navy, flat, a 4px radius, one raspberry
+# accent kept for status. Custom property names match the design system's
+# tokens so values can be traced back to it. Its type sizes were made for a
+# compact desktop toolbar, so body and status text are scaled up here to stay
+# readable on phones. Only system fonts are used: loading web fonts would
+# mean a third-party request (and a looser CSP) on every visit.
 PAGE_STYLE = (
+    ":root{color-scheme:dark;--backgroundCLR:#181825;--statusBG:#11111b;--dividerCLR:#2a2a3e;"
+    "--statusTextCLR:#e94560;--tooltip-fg:#dddddd;--radius-sm:4px;"
+    '--mono:Consolas,monospace;--sans:"Segoe UI",sans-serif}'
     "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
-    "background:#16181d;color:#e6e6e6;font:16px/1.5 system-ui,sans-serif;padding:16px;box-sizing:border-box}"
-    "main{max-width:28rem;background:#1f2229;border-radius:12px;padding:2rem}"
-    "h1{font-size:1.4rem;margin:0 0 .75rem}p{margin:0}"
+    "padding:16px;box-sizing:border-box;background:var(--statusBG);color:var(--tooltip-fg);"
+    "font:15px/1.5 var(--sans)}"
+    "main{box-sizing:border-box;width:100%;max-width:28rem;background:var(--backgroundCLR);border:1px solid var(--dividerCLR);"
+    "border-radius:var(--radius-sm);overflow:hidden}"
+    "header{padding:6px 8px;border-bottom:1px solid var(--dividerCLR);font:700 14.67px/1.5 var(--mono)}"
+    "section{padding:16px 8px 20px}"
+    "h1{margin:0 0 8px;font:700 18.67px/1.3 var(--mono)}p{margin:0}"
+    "footer{padding:3px 8px;background:var(--statusBG);color:var(--statusTextCLR);"
+    "font:13px/1.5 var(--mono);white-space:pre-wrap}"
 )
 # Hashing the one stylesheet into the CSP lets the policy forbid every other
 # style and all scripts, so even an HTML injection bug couldn't run code.
@@ -74,23 +89,39 @@ SECURITY_HEADERS = {
     "Server": "hollowwarden",
 }
 
+# (title, message, status line). Following the theme's copy rules, an
+# outcome's status line starts with ✓ or ⚠ and two spaces; success and
+# failure are told apart by that symbol, never by colour.
 OUTCOME_PAGES = {
-    Outcome.VERIFIED: ("You're verified", "You now have access to the server. You can close this tab."),
+    Outcome.VERIFIED: ("You're verified", "You now have access to the server. You can close this tab.", "✓  Verified."),
     Outcome.PENDING_REVIEW: (
         "Waiting for a moderator",
         "Your verification needs a quick manual check. A moderator will review it soon.",
+        "Pending review.",
     ),
-    Outcome.ALREADY_VERIFIED: ("Already verified", "This account is already verified. You can close this tab."),
-    Outcome.NOT_MEMBER: ("Join the server first", "This Discord account isn't a member of the server."),
+    Outcome.ALREADY_VERIFIED: (
+        "Already verified",
+        "This account is already verified. You can close this tab.",
+        "✓  Already verified.",
+    ),
+    Outcome.NOT_MEMBER: (
+        "Join the server first",
+        "This Discord account isn't a member of the server.",
+        "⚠  Not a member.",
+    ),
 }
 
 
-def renderPage(status: int, title: str, message: str) -> web.Response:
+def renderPage(status: int, title: str, message: str, statusLine: str | None = None) -> web.Response:
+    if statusLine is None:
+        statusLine = f"⚠  {title}." if status >= 400 else "Ready."
     body = (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         f"<title>{html.escape(title)} · HollowWarden</title><style>{PAGE_STYLE}</style></head>"
-        f"<body><main><h1>{html.escape(title)}</h1><p>{html.escape(message)}</p></main></body></html>"
+        "<body><main><header>HollowWarden</header>"
+        f"<section><h1>{html.escape(title)}</h1><p>{html.escape(message)}</p></section>"
+        f'<footer role="status">{html.escape(statusLine)}</footer></main></body></html>'
     )
     return web.Response(status=status, text=body, content_type="text/html", charset="utf-8")
 
@@ -236,8 +267,8 @@ class VerificationSite:
 
         ipHash = hashIp(self.settings.ipHashKey, request[CLIENT_IP_KEY])
         outcome = await self.verifier.completeWeb(expectedUserId, ipHash)
-        title, message = OUTCOME_PAGES[outcome]
-        return self.finish(renderPage(200, title, message))
+        title, message, statusLine = OUTCOME_PAGES[outcome]
+        return self.finish(renderPage(200, title, message, statusLine))
 
     @staticmethod
     def finish(response: web.Response) -> web.Response:

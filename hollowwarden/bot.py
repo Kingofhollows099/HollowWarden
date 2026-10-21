@@ -58,11 +58,16 @@ DANGEROUS_PERMISSIONS = discord.Permissions(
     view_audit_log=True,
 )
 
+# Styling follows the Clipboard Cleaner theme: one raspberry accent on every
+# embed, and outcome messages that start with ✓ or ⚠ plus two spaces, so
+# success and failure are told apart by symbol rather than colour.
+ACCENT_COLOUR = discord.Colour(0xE94560)
+
 OUTCOME_MESSAGES = {
-    Outcome.VERIFIED: "✅ You're verified. Welcome!",
-    Outcome.PENDING_REVIEW: "⏳ Thanks! A moderator needs to take a quick look before you get access.",
-    Outcome.ALREADY_VERIFIED: "You're already verified.",
-    Outcome.NOT_MEMBER: "You need to be in the server to verify.",
+    Outcome.VERIFIED: "✓  Verified. Welcome to the server.",
+    Outcome.PENDING_REVIEW: "Pending review. A moderator will take a quick look before you get access.",
+    Outcome.ALREADY_VERIFIED: "✓  Already verified.",
+    Outcome.NOT_MEMBER: "⚠  You need to be in the server to verify.",
 }
 
 
@@ -84,7 +89,9 @@ class VerifyPanelView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id=VERIFY_BUTTON_ID)
+    # Discord only offers fixed button colours. Its red is the closest to the
+    # theme's raspberry accent, which marks the "go" action.
+    @discord.ui.button(label="Verify", emoji="▶", style=discord.ButtonStyle.danger, custom_id=VERIFY_BUTTON_ID)
     async def verifyButton(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.client.handleVerifyClick(interaction)
 
@@ -100,7 +107,7 @@ class CaptchaView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=CAPTCHA_LIFETIME_SECONDS)
 
-    @discord.ui.button(label="Enter code", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Enter code", emoji="▶", style=discord.ButtonStyle.danger)
     async def enterCodeButton(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.send_modal(CaptchaAnswerModal())
 
@@ -115,9 +122,12 @@ class ReviewButton(
     def __init__(self, action: str, userId: int) -> None:
         isApprove = action == "approve"
         super().__init__(
+            # Both neutral grey, told apart by symbol and label, so a red
+            # "go" button can't be mistaken for Deny at a glance.
             discord.ui.Button(
                 label="Approve" if isApprove else "Deny",
-                style=discord.ButtonStyle.success if isApprove else discord.ButtonStyle.danger,
+                emoji="✓" if isApprove else "⚠",
+                style=discord.ButtonStyle.secondary,
                 custom_id=f"hollowwarden:review:{action}:{userId}",
             )
         )
@@ -247,12 +257,8 @@ class HollowWardenBot(discord.Client):
         if channel is None:
             log.error("could not post review for %s: mod channel unavailable", userId)
             return
-        heading = "🛑 Verification held for review" if needsDecision else "⚠️ Verified with flags"
-        embed = discord.Embed(
-            title=heading,
-            description=f"<@{userId}> (`{userId}`)",
-            colour=discord.Colour.orange() if needsDecision else discord.Colour.gold(),
-        )
+        heading = "⚠  Held for review" if needsDecision else "⚠  Verified with flags"
+        embed = discord.Embed(title=heading, description=f"<@{userId}> (`{userId}`)", colour=ACCENT_COLOUR)
         embed.add_field(name="Why", value="\n".join(f"• {reason}" for reason in reasons)[:1024], inline=False)
         view = None
         if needsDecision:
@@ -278,15 +284,15 @@ class HollowWardenBot(discord.Client):
         # default_permissions only sets the default; server admins can change
         # who sees the command, so the permission is checked again here.
         if not self.isHomeGuild(interaction) or not interaction.permissions.manage_guild:
-            await interaction.response.send_message("You don't have permission to do that.", ephemeral=True)
+            await interaction.response.send_message("⚠  You don't have permission to do that.", ephemeral=True)
             return
         embed = discord.Embed(
             title="Verification",
-            description="Click **Verify** below to get access to the server.",
-            colour=discord.Colour.green(),
+            description="Press **Verify** to get access to the server.",
+            colour=ACCENT_COLOUR,
         )
         await interaction.channel.send(embed=embed, view=VerifyPanelView())
-        await interaction.response.send_message("Verification panel posted.", ephemeral=True)
+        await interaction.response.send_message("✓  Verification panel posted.", ephemeral=True)
 
     async def handleVerifyClick(self, interaction: discord.Interaction) -> None:
         if not self.isHomeGuild(interaction):
@@ -297,7 +303,9 @@ class HollowWardenBot(discord.Client):
             await interaction.response.send_message(OUTCOME_MESSAGES[Outcome.ALREADY_VERIFIED], ephemeral=True)
             return
         if not self.clickLimiter.allow(userId):
-            await interaction.response.send_message("Please wait a few minutes before trying again.", ephemeral=True)
+            await interaction.response.send_message(
+                "⚠  Too many attempts. Wait a few minutes and try again.", ephemeral=True
+            )
             return
         if await self.storage.hasPendingReview(userId):
             await interaction.response.send_message(OUTCOME_MESSAGES[Outcome.PENDING_REVIEW], ephemeral=True)
@@ -317,7 +325,7 @@ class HollowWardenBot(discord.Client):
         )
         # Ephemeral, so only this person ever sees their link.
         await interaction.response.send_message(
-            "Click below and log in with Discord to verify. The link is just for you, works once, "
+            "Log in with Discord to verify. This link is yours only, works once, "
             f"and expires in {WEB_LINK_LIFETIME_SECONDS // 60} minutes. **Don't share it.**",
             view=view,
             ephemeral=True,
@@ -327,7 +335,7 @@ class HollowWardenBot(discord.Client):
         now = time.monotonic()
         self.pruneCaptchas(now)
         if len(self.captchaChallenges) >= MAX_ACTIVE_CAPTCHAS:
-            await interaction.response.send_message("Verification is busy; try again shortly.", ephemeral=True)
+            await interaction.response.send_message("⚠  Verification is busy. Try again shortly.", ephemeral=True)
             return
 
         code = generateCode()
@@ -337,8 +345,9 @@ class HollowWardenBot(discord.Client):
         imageFile = discord.File(io.BytesIO(renderCaptcha(code)), filename="captcha.png")
         embed = discord.Embed(
             title="Verification",
-            description=f"Type the code in the image. You have {CAPTCHA_ATTEMPTS} attempts and "
-            f"{CAPTCHA_LIFETIME_SECONDS // 60} minutes. Letters aren't case sensitive.",
+            description=f"Type the code in the image. {CAPTCHA_ATTEMPTS} attempts, "
+            f"{CAPTCHA_LIFETIME_SECONDS // 60} minutes. Not case sensitive.",
+            colour=ACCENT_COLOUR,
         )
         embed.set_image(url="attachment://captcha.png")
         await interaction.response.send_message(embed=embed, file=imageFile, view=CaptchaView(), ephemeral=True)
@@ -356,7 +365,7 @@ class HollowWardenBot(discord.Client):
         if challenge is None or challenge.expiresAt <= time.monotonic():
             self.captchaChallenges.pop(userId, None)
             await interaction.response.send_message(
-                "That code has expired. Click **Verify** to get a new one.", ephemeral=True
+                "⚠  Code expired. Press **Verify** for a new one.", ephemeral=True
             )
             return
 
@@ -365,11 +374,11 @@ class HollowWardenBot(discord.Client):
             if challenge.attemptsLeft <= 0:
                 del self.captchaChallenges[userId]
                 await interaction.response.send_message(
-                    "Incorrect, and out of attempts. Click **Verify** to get a new code.", ephemeral=True
+                    "⚠  Incorrect, no attempts left. Press **Verify** for a new code.", ephemeral=True
                 )
             else:
                 await interaction.response.send_message(
-                    f"Incorrect. {challenge.attemptsLeft} attempt(s) left.", ephemeral=True
+                    f"⚠  Incorrect. {challenge.attemptsLeft} attempt(s) left.", ephemeral=True
                 )
             return
 
@@ -380,7 +389,7 @@ class HollowWardenBot(discord.Client):
             outcome = await self.verifier.completeCaptcha(userId)
         except Exception:
             log.exception("verification failed for %s", userId)
-            await interaction.followup.send("Something went wrong. Please tell a moderator.", ephemeral=True)
+            await interaction.followup.send("⚠  Something went wrong. Tell a moderator.", ephemeral=True)
             return
         await interaction.followup.send(OUTCOME_MESSAGES[outcome], ephemeral=True)
 
@@ -388,20 +397,20 @@ class HollowWardenBot(discord.Client):
         # Checked on every click, not just by channel visibility: if the mod
         # channel's permissions are ever loosened, the buttons stay locked.
         if not self.isHomeGuild(interaction) or not interaction.permissions.manage_roles:
-            await interaction.response.send_message("Only moderators can do that.", ephemeral=True)
+            await interaction.response.send_message("⚠  Only moderators can do that.", ephemeral=True)
             return
         await interaction.response.defer()
         try:
             handled = await self.verifier.resolveReview(userId, approve)
         except Exception:
             log.exception("could not apply review decision for %s", userId)
-            await interaction.followup.send("Couldn't apply that; check the bot's logs.", ephemeral=True)
+            await interaction.followup.send("⚠  Couldn't apply that. Check the bot's logs.", ephemeral=True)
             return
         if not handled:
-            await interaction.followup.send("This review was already handled.", ephemeral=True)
+            await interaction.followup.send("⚠  Already handled.", ephemeral=True)
             return
 
-        decision = "approved ✅" if approve else "denied ❌"
+        decision = "✓  Approved" if approve else "⚠  Denied"
         log.info("review for %s %s by %s", userId, "approved" if approve else "denied", interaction.user.id)
         message = interaction.message
         if message is not None:

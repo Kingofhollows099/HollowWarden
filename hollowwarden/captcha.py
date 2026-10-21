@@ -21,6 +21,13 @@ CAPTCHA_LENGTH = 6
 IMAGE_WIDTH = 360
 IMAGE_HEIGHT = 120
 
+# Clipboard Cleaner theme colours. Glyphs and the thin crossing lines share
+# the same two light colours on purpose: if the noise were darker than the
+# text, a bot could delete it with a single brightness threshold.
+BACKGROUND_COLOUR = (0x18, 0x18, 0x25)  # backgroundCLR
+GLYPH_COLOURS = ((0xDD, 0xDD, 0xDD), (0xE9, 0x45, 0x60))  # tooltip-fg, OnBtnBackgroundCLR (accent)
+SPECKLE_COLOURS = ((0x2A, 0x2A, 0x3E), (0x33, 0x33, 0x55), (0x44, 0x44, 0x5A))  # dividerCLR, spinbox-border, OffBtnForegroundCLR
+
 
 def generateCode() -> str:
     # `secrets` rather than `random`: random's output is predictable once
@@ -38,29 +45,30 @@ def randomBetween(low: int, high: int) -> int:
 
 
 def renderCaptcha(code: str) -> bytes:
-    image = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (24, 26, 32))
+    image = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), BACKGROUND_COLOUR)
     draw = ImageDraw.Draw(image)
 
-    for _ in range(8):
-        lineColour = (randomBetween(70, 140), randomBetween(70, 140), randomBetween(70, 140))
-        startPoint = (randomBetween(0, IMAGE_WIDTH), randomBetween(0, IMAGE_HEIGHT))
-        endPoint = (randomBetween(0, IMAGE_WIDTH), randomBetween(0, IMAGE_HEIGHT))
-        draw.line([startPoint, endPoint], fill=lineColour, width=randomBetween(1, 3))
+    for _ in range(600):
+        draw.point(
+            (randomBetween(0, IMAGE_WIDTH - 1), randomBetween(0, IMAGE_HEIGHT - 1)),
+            fill=secrets.choice(SPECKLE_COLOURS),
+        )
 
     font = ImageFont.load_default(size=64)
     slotWidth = IMAGE_WIDTH // (len(code) + 1)
     for index, character in enumerate(code):
         glyph = Image.new("RGBA", (90, 100), (0, 0, 0, 0))
-        glyphColour = (randomBetween(170, 255), randomBetween(170, 255), randomBetween(170, 255), 255)
-        ImageDraw.Draw(glyph).text((15, 10), character, font=font, fill=glyphColour)
+        ImageDraw.Draw(glyph).text((15, 10), character, font=font, fill=(*secrets.choice(GLYPH_COLOURS), 255))
         glyph = glyph.rotate(randomBetween(-28, 28), resample=Image.Resampling.BICUBIC, expand=False)
         positionX = slotWidth // 2 + index * slotWidth + randomBetween(-6, 6)
         positionY = randomBetween(-4, 22)
         image.paste(glyph, (positionX, positionY), glyph)
 
-    for _ in range(600):
-        dotColour = (randomBetween(60, 200), randomBetween(60, 200), randomBetween(60, 200))
-        draw.point((randomBetween(0, IMAGE_WIDTH - 1), randomBetween(0, IMAGE_HEIGHT - 1)), fill=dotColour)
+    # Lines go on after the glyphs so they cross through them.
+    for _ in range(6):
+        startPoint = (randomBetween(0, IMAGE_WIDTH), randomBetween(0, IMAGE_HEIGHT))
+        endPoint = (randomBetween(0, IMAGE_WIDTH), randomBetween(0, IMAGE_HEIGHT))
+        draw.line([startPoint, endPoint], fill=secrets.choice(GLYPH_COLOURS), width=1)
 
     image = image.filter(ImageFilter.SMOOTH)
     output = io.BytesIO()

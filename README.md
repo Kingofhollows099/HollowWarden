@@ -202,6 +202,12 @@ To change dependencies, edit `requirements.in`, then regenerate the pins with
 `pip-compile --generate-hashes --allow-unsafe --strip-extras requirements.in`.
 Review what changed before committing.
 
+Look and feel follows the Clipboard Cleaner design system: dark navy, flat,
+one raspberry accent (`#e94560`), and outcome messages that begin with `✓` or
+`⚠` followed by two spaces. Discord only has fixed button colours, so its red stands in
+for the accent on the "go" buttons (Verify, Enter code). Approve and Deny are
+both grey and differ by symbol, so a red button can't be mistaken for Deny.
+
 Code style note: variables and functions use camelCase by project
 convention. Methods that discord.py calls by name (`setup_hook`, `on_ready`,
 `callback`, `on_submit`, `from_custom_id`) must stay snake_case.

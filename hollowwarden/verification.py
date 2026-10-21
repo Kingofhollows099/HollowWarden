@@ -98,7 +98,7 @@ class Verifier:
 
         if not reasons:
             await self.gateway.grantVerifiedRole(userId)
-            await self.gateway.postModLog(f"✅ <@{userId}> (`{userId}`) verified by {method}.")
+            await self.gateway.postModLog(f"✓  <@{userId}> (`{userId}`) verified by {method}.")
             log.info("user %s verified by %s", userId, method)
             return Outcome.VERIFIED
 
