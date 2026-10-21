@@ -1,0 +1,58 @@
+# HollowWarden. Settings go in .env (copy .env.example) and secrets in ./secrets/.
+# See README.md for the full setup.
+
+services:
+  hollowwarden:
+    build: .
+    image: hollowwarden:local
+    container_name: hollowwarden
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/hollowwarden.db
+      DISCORD_BOT_TOKEN_FILE: /run/secrets/discord_bot_token
+      DISCORD_CLIENT_SECRET_FILE: /run/secrets/discord_client_secret
+      IP_HASH_KEY_FILE: /run/secrets/ip_hash_key
+    secrets:
+      - discord_bot_token
+      - discord_client_secret
+      - ip_hash_key
+    volumes:
+      - hollowwarden-data:/data
+
+    # Hardening. Each line removes something an attacker would want if they
+    # ever got code running inside the container.
+    user: "10001:10001"
+    read_only: true                # can't modify its own code or drop tools on disk
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+    cap_drop: [ALL]                # no Linux capabilities at all; none are needed
+    security_opt:
+      - no-new-privileges:true     # setuid binaries can't raise privileges
+    pids_limit: 128                # no fork bombs
+    mem_limit: 256m                # a leak or attack can't starve your other services
+    cpus: 1.0
+
+    # No `ports:` section on purpose. The container isn't reachable from your
+    # LAN or the internet directly; only Nginx Proxy Manager can reach it,
+    # over the shared Docker network below.
+    networks:
+      - proxy
+
+volumes:
+  hollowwarden-data:
+
+networks:
+  proxy:
+    # The network your Nginx Proxy Manager container is on
+    # (find it with: docker inspect <npm-container> --format '{{json .NetworkSettings.Networks}}').
+    external: true
+    name: ${NPM_NETWORK:-npm_default}
+
+secrets:
+  discord_bot_token:
+    file: ./secrets/discord_bot_token
+  discord_client_secret:
+    file: ./secrets/discord_client_secret
+  ip_hash_key:
+    file: ./secrets/ip_hash_key
