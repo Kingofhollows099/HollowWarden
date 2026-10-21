@@ -1,0 +1,10 @@
+# Keep secrets, local config and dev files out of the build context, so they
+# can never be baked into an image layer by accident.
+.env
+.env.*
+secrets/
+.git/
+.venv/
+tests/
+**/__pycache__/
+*.db*

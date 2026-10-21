@@ -1,0 +1,15 @@
+# Never commit secrets or local config
+.env
+secrets/*
+!secrets/README.md
+
+# Local data
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
