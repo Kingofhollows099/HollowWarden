@@ -154,6 +154,13 @@ Verify button.
 - **Held for review:** a message appears in the mod channel explaining why,
   with **Approve** and **Deny** buttons. Only people with Manage Roles can
   use them, and the bot checks that on every click.
+- **Manually verifying someone:** an admin can skip all checks for a person
+  they vouch for. Use `/verify-member member:@them note:why`, or right-click
+  the member → **Apps → Verify member**. This requires the Administrator
+  permission, checked by the bot on every use, not just by Discord's command
+  settings. Every manual verification is posted to the mod log with the
+  admin's name, and the admin is also named in Discord's audit log. If the
+  person was waiting for review, that review closes.
 - **Updating:** `git pull && docker compose up -d --build`.
 - **Bot token leaked?** Reset it immediately in the developer portal,
   replace `secrets/discord_bot_token`, and run `docker compose up -d`.

@@ -171,9 +171,28 @@ class HollowWardenBot(discord.Client):
         async def verificationPanelCommand(interaction: discord.Interaction) -> None:
             await self.handlePanelCommand(interaction)
 
+        @app_commands.command(name="verify-member", description="Verify a member without making them pass a check")
+        @app_commands.describe(member="Who to verify", note="Why, shown in the mod log")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.guild_only()
+        async def verifyMemberCommand(
+            interaction: discord.Interaction,
+            member: discord.Member,
+            note: app_commands.Range[str, 1, 200] | None = None,
+        ) -> None:
+            await self.handleManualVerify(interaction, member, note)
+
+        # The same action from a member's right-click menu (Apps → Verify member).
+        @app_commands.context_menu(name="Verify member")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.guild_only()
+        async def verifyMemberMenu(interaction: discord.Interaction, member: discord.Member) -> None:
+            await self.handleManualVerify(interaction, member, None)
+
         homeGuild = discord.Object(id=self.settings.guildId)
         # Registered only in your server, never globally.
-        self.tree.add_command(verificationPanelCommand, guild=homeGuild)
+        for command in (verificationPanelCommand, verifyMemberCommand, verifyMemberMenu):
+            self.tree.add_command(command, guild=homeGuild)
         await self.tree.sync(guild=homeGuild)
 
     async def on_ready(self) -> None:
@@ -241,11 +260,11 @@ class HollowWardenBot(discord.Client):
         hasRole = any(role.id == self.settings.verifiedRoleId for role in member.roles)
         return MemberState(isMember=True, hasVerifiedRole=hasRole)
 
-    async def grantVerifiedRole(self, userId: int) -> None:
+    async def grantVerifiedRole(self, userId: int, auditReason: str | None = None) -> None:
         role = self.getVerifiedRole()
         guild = role.guild
         member = await guild.fetch_member(userId)
-        await member.add_roles(role, reason="Passed HollowWarden verification")
+        await member.add_roles(role, reason=auditReason or "Passed HollowWarden verification")
 
     async def postModLog(self, message: str) -> None:
         channel = await self.getModChannel()
@@ -392,6 +411,39 @@ class HollowWardenBot(discord.Client):
             await interaction.followup.send("⚠  Something went wrong. Tell a moderator.", ephemeral=True)
             return
         await interaction.followup.send(OUTCOME_MESSAGES[outcome], ephemeral=True)
+
+    async def handleManualVerify(
+        self, interaction: discord.Interaction, member: discord.Member, note: str | None
+    ) -> None:
+        # default_permissions only sets who sees the command by default. A
+        # server owner can open it up to anyone under Server Settings →
+        # Integrations, so Administrator is checked again on every use.
+        if not self.isHomeGuild(interaction) or not interaction.permissions.administrator:
+            await interaction.response.send_message("⚠  Only admins can do that.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # One line, no Markdown tricks, so a note can't disguise itself as
+        # extra log entries in the mod channel.
+        cleanNote = discord.utils.escape_markdown(" ".join(note.split())) if note else None
+        try:
+            outcome = await self.verifier.manualVerify(member.id, interaction.user.id, cleanNote)
+        except UnsafeRoleError as error:
+            await interaction.followup.send(f"⚠  {error}", ephemeral=True)
+            return
+        except Exception:
+            log.exception("manual verification of %s failed", member.id)
+            await interaction.followup.send("⚠  Couldn't verify them. Check the bot's logs.", ephemeral=True)
+            return
+
+        if outcome is Outcome.VERIFIED:
+            # Any CAPTCHA they had open is now pointless.
+            self.captchaChallenges.pop(member.id, None)
+            await interaction.followup.send(f"✓  Verified {member.mention}.", ephemeral=True)
+        elif outcome is Outcome.ALREADY_VERIFIED:
+            await interaction.followup.send(f"✓  {member.mention} is already verified.", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠  That person isn't in the server.", ephemeral=True)
 
     async def handleReviewDecision(self, interaction: discord.Interaction, userId: int, approve: bool) -> None:
         # Checked on every click, not just by channel visibility: if the mod

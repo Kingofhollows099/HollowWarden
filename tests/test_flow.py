@@ -29,6 +29,7 @@ class FakeGateway:
     def __init__(self, members=None):
         self.members = members if members is not None else {}
         self.granted = []
+        self.auditReasons = []
         self.logs = []
         self.reviews = []
 
@@ -37,8 +38,9 @@ class FakeGateway:
             return MemberState(isMember=False, hasVerifiedRole=False)
         return MemberState(isMember=True, hasVerifiedRole=self.members[userId])
 
-    async def grantVerifiedRole(self, userId):
+    async def grantVerifiedRole(self, userId, auditReason=None):
         self.granted.append(userId)
+        self.auditReasons.append(auditReason)
         self.members[userId] = True
 
     async def postModLog(self, message):
@@ -144,6 +146,44 @@ class TestVerifier:
         assert await verifier.completeCaptcha(NEW_USER) is Outcome.VERIFIED
         assert gateway.granted == [NEW_USER]
         assert gateway.reviews[0][2] is False
+
+    async def test_manualVerifyBypassesChecks(self, settings, storage):
+        # A brand-new account would normally be held; an admin can let it in.
+        gateway = FakeGateway({NEW_USER: False})
+        outcome = await Verifier(settings, storage, gateway).manualVerify(NEW_USER, OLD_USER, "my cousin")
+        assert outcome is Outcome.VERIFIED
+        assert gateway.granted == [NEW_USER]
+        assert gateway.reviews == []
+        assert str(OLD_USER) in gateway.auditReasons[0]
+        assert str(OLD_USER) in gateway.logs[0] and "my cousin" in gateway.logs[0]
+
+    async def test_manualVerifyClosesPendingReview(self, settings, storage):
+        gateway = FakeGateway({NEW_USER: False})
+        verifier = Verifier(settings, storage, gateway)
+        assert await verifier.completeCaptcha(NEW_USER) is Outcome.PENDING_REVIEW
+        assert await verifier.manualVerify(NEW_USER, OLD_USER) is Outcome.VERIFIED
+        # The old review's Approve button now reports "already handled".
+        assert not await verifier.resolveReview(NEW_USER, approve=True)
+
+    async def test_manualVerifyKeepsReviewIfGrantFails(self, settings, storage):
+        gateway = FakeGateway({NEW_USER: False})
+        verifier = Verifier(settings, storage, gateway)
+        await verifier.completeCaptcha(NEW_USER)
+
+        async def failingGrant(userId, auditReason=None):
+            raise RuntimeError("role hierarchy")
+
+        gateway.grantVerifiedRole = failingGrant
+        with pytest.raises(RuntimeError):
+            await verifier.manualVerify(NEW_USER, OLD_USER)
+        assert await storage.hasPendingReview(NEW_USER)
+
+    async def test_manualVerifyEdgeCases(self, settings, storage):
+        gateway = FakeGateway({OLD_USER: True})
+        verifier = Verifier(settings, storage, gateway)
+        assert await verifier.manualVerify(OLD_USER, OTHER_OLD_USER) is Outcome.ALREADY_VERIFIED
+        assert await verifier.manualVerify(NEW_USER, OTHER_OLD_USER) is Outcome.NOT_MEMBER
+        assert gateway.granted == [] and gateway.logs == []
 
     async def test_nonMemberRejected(self, settings, storage):
         gateway = FakeGateway({})

@@ -39,7 +39,7 @@ class MemberState:
 class DiscordGateway(Protocol):
     async def getMemberState(self, userId: int) -> MemberState: ...
 
-    async def grantVerifiedRole(self, userId: int) -> None: ...
+    async def grantVerifiedRole(self, userId: int, auditReason: str | None = None) -> None: ...
 
     async def postModLog(self, message: str) -> None: ...
 
@@ -126,6 +126,31 @@ class Verifier:
         if extraCount > 0:
             descriptions.append(f"and {extraCount} more")
         return "Verified from the same network as: " + ", ".join(descriptions) + "."
+
+    async def manualVerify(self, userId: int, adminId: int, note: str | None = None) -> Outcome:
+        """An admin vouches for someone directly, so none of the checks run.
+
+        Every manual verification is posted to the mod log with the admin's
+        name. A bypass is exactly what a compromised or careless admin
+        account would use, so it should never happen silently.
+        """
+        memberState = await self.gateway.getMemberState(userId)
+        if not memberState.isMember:
+            return Outcome.NOT_MEMBER
+        if memberState.hasVerifiedRole:
+            return Outcome.ALREADY_VERIFIED
+
+        # Discord's audit log names the bot as the one who added the role, so
+        # the admin is recorded in the reason.
+        await self.gateway.grantVerifiedRole(userId, auditReason=f"Manually verified by admin {adminId}")
+        # Cleared only after the role is granted, so a failure leaves any
+        # pending review in place. Once cleared, that review's buttons answer
+        # "Already handled".
+        await self.storage.popPendingReview(userId)
+        noteText = f" Note: {note}" if note else ""
+        await self.gateway.postModLog(f"✓  <@{userId}> (`{userId}`) manually verified by <@{adminId}>.{noteText}")
+        log.info("user %s manually verified by %s", userId, adminId)
+        return Outcome.VERIFIED
 
     async def resolveReview(self, userId: int, approve: bool) -> bool:
         """Apply a moderator decision. Returns False if it was already handled."""
