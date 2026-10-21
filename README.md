@@ -29,18 +29,24 @@ to `web` if alts or ban evasion actually become a problem.
 ### 1. Create the Discord application
 
 1. Go to <https://discord.com/developers/applications>, click **New Application**, and name it.
-2. **Bot** tab:
-   - Click **Reset Token** and copy the token (you'll save it in step 3).
+2. **Installation** tab (do this before the Bot tab, or Discord won't let
+   you make the bot private: *"Private application cannot have a default
+   authorization link"*):
+   - Set **Install Link** to **None** and save.
+   - Under **Installation Contexts**, untick **User Install** and keep only
+     **Guild Install**.
+3. **Bot** tab:
+   - Click **Reset Token** and copy the token (you'll save it in the Configure step below).
    - Turn **Public Bot OFF**. Otherwise anyone who finds the bot could add it
      to their own server. (The bot also leaves any server that isn't yours,
      but there's no reason to rely on that alone.)
    - Leave all three **Privileged Gateway Intents OFF**. The bot doesn't
      need them, and every permission it lacks is one an attacker can't
      abuse if the token ever leaks.
-3. **Web mode only**, on the **OAuth2** tab:
+4. **Web mode only**, on the **OAuth2** tab:
    - Under **Redirects**, add `https://verify.example.com/callback` (your real domain).
    - Copy the **Client ID**, then reset and copy the **Client Secret**.
-4. Invite the bot. **OAuth2 → URL Generator** → scopes `bot` and
+5. Invite the bot. **OAuth2 → URL Generator** → scopes `bot` and
    `applications.commands`, permissions **Manage Roles, View Channels, Send
    Messages, Embed Links, Attach Files**. Open the URL and pick your server.
    **Never grant Administrator.**
