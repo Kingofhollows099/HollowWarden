@@ -18,6 +18,7 @@ def baseEnviron(tmp_path, **overrides):
         "GUILD_ID": "111111111111111111",
         "VERIFIED_ROLE_ID": "222222222222222222",
         "MOD_CHANNEL_ID": "333333333333333333",
+        "ADMIN_ROLE_IDS": "555555555555555555, 666666666666666666",
     }
     environ.update(overrides)
     return environ
@@ -83,6 +84,24 @@ class TestConfig:
     def test_missingSecretFile(self, tmp_path):
         with pytest.raises(ConfigError, match="DISCORD_BOT_TOKEN"):
             loadSettings(baseEnviron(tmp_path, DISCORD_BOT_TOKEN_FILE=str(tmp_path / "missing")))
+
+    def test_adminRolesParsed(self, tmp_path):
+        settings = loadSettings(baseEnviron(tmp_path))
+        assert settings.adminRoleIds == {555555555555555555, 666666666666666666}
+
+    @pytest.mark.parametrize(
+        "adminRoleIds",
+        [
+            "",
+            "admins",
+            "555555555555555555,not-a-role",
+            "111111111111111111",  # @everyone: every member would be a bot admin
+            "555555555555555555,222222222222222222",  # the Verified role
+        ],
+    )
+    def test_unsafeAdminRolesRejected(self, tmp_path, adminRoleIds):
+        with pytest.raises(ConfigError, match="ADMIN_ROLE_IDS"):
+            loadSettings(baseEnviron(tmp_path, ADMIN_ROLE_IDS=adminRoleIds))
 
     def test_invalidSnowflake(self, tmp_path):
         with pytest.raises(ConfigError, match="GUILD_ID"):

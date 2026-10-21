@@ -53,6 +53,7 @@ class Settings:
     guildId: int
     verifiedRoleId: int
     modChannelId: int
+    adminRoleIds: frozenset[int]
     verifyMethod: str
     flaggedAction: str
     minAccountAgeDays: int
@@ -87,6 +88,25 @@ def readSnowflake(name: str, environ: dict[str, str]) -> int:
     if not SNOWFLAKE_PATTERN.match(value):
         raise ConfigError(f"{name} must be a Discord ID (enable Developer Mode and use Copy ID)")
     return int(value)
+
+
+def readAdminRoleIds(environ: dict[str, str], guildId: int, verifiedRoleId: int) -> frozenset[int]:
+    entries = [entry.strip() for entry in environ.get("ADMIN_ROLE_IDS", "").split(",") if entry.strip()]
+    if not entries:
+        raise ConfigError("ADMIN_ROLE_IDS must list at least one role ID (comma-separated)")
+    roleIds = set()
+    for entry in entries:
+        if not SNOWFLAKE_PATTERN.match(entry):
+            raise ConfigError(f"ADMIN_ROLE_IDS entry {entry!r} is not a role ID")
+        roleIds.add(int(entry))
+    # Either of these would quietly make large numbers of people bot admins:
+    # @everyone (whose ID is the server's ID) is held by all members, and the
+    # Verified role by everyone who passes verification.
+    if guildId in roleIds:
+        raise ConfigError("ADMIN_ROLE_IDS must not include @everyone (the server's own ID)")
+    if verifiedRoleId in roleIds:
+        raise ConfigError("ADMIN_ROLE_IDS must not include VERIFIED_ROLE_ID")
+    return frozenset(roleIds)
 
 
 def readInt(name: str, environ: dict[str, str], default: int, minimum: int, maximum: int) -> int:
@@ -172,11 +192,14 @@ def loadWebSettings(environ: dict[str, str]) -> WebSettings:
 def loadSettings(environ: dict[str, str] | None = None) -> Settings:
     environ = dict(os.environ if environ is None else environ)
     verifyMethod = readChoice("VERIFY_METHOD", environ, VERIFY_METHODS, default="captcha")
+    guildId = readSnowflake("GUILD_ID", environ)
+    verifiedRoleId = readSnowflake("VERIFIED_ROLE_ID", environ)
     return Settings(
         botToken=readSecret("DISCORD_BOT_TOKEN", environ),
-        guildId=readSnowflake("GUILD_ID", environ),
-        verifiedRoleId=readSnowflake("VERIFIED_ROLE_ID", environ),
+        guildId=guildId,
+        verifiedRoleId=verifiedRoleId,
         modChannelId=readSnowflake("MOD_CHANNEL_ID", environ),
+        adminRoleIds=readAdminRoleIds(environ, guildId, verifiedRoleId),
         verifyMethod=verifyMethod,
         flaggedAction=readChoice("FLAGGED_ACTION", environ, FLAGGED_ACTIONS, default="review"),
         minAccountAgeDays=readInt("MIN_ACCOUNT_AGE_DAYS", environ, default=7, minimum=0, maximum=3650),
