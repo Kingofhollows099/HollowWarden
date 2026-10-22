@@ -29,18 +29,24 @@ to `web` if alts or ban evasion actually become a problem.
 ### 1. Create the Discord application
 
 1. Go to <https://discord.com/developers/applications>, click **New Application**, and name it.
-2. **Bot** tab:
-   - Click **Reset Token** and copy the token (you'll save it in step 3).
+2. **Installation** tab (do this before the Bot tab, or Discord won't let
+   you make the bot private: *"Private application cannot have a default
+   authorization link"*):
+   - Set **Install Link** to **None** and save.
+   - Under **Installation Contexts**, untick **User Install** and keep only
+     **Guild Install**.
+3. **Bot** tab:
+   - Click **Reset Token** and copy the token (you'll save it in the Configure step below).
    - Turn **Public Bot OFF**. Otherwise anyone who finds the bot could add it
      to their own server. (The bot also leaves any server that isn't yours,
      but there's no reason to rely on that alone.)
    - Leave all three **Privileged Gateway Intents OFF**. The bot doesn't
      need them, and every permission it lacks is one an attacker can't
      abuse if the token ever leaks.
-3. **Web mode only**, on the **OAuth2** tab:
+4. **Web mode only**, on the **OAuth2** tab:
    - Under **Redirects**, add `https://verify.example.com/callback` (your real domain).
    - Copy the **Client ID**, then reset and copy the **Client Secret**.
-4. Invite the bot. **OAuth2 → URL Generator** → scopes `bot` and
+5. Invite the bot. **OAuth2 → URL Generator** → scopes `bot` and
    `applications.commands`, permissions **Manage Roles, View Channels, Send
    Messages, Embed Links, Attach Files**. Open the URL and pick your server.
    **Never grant Administrator.**
@@ -60,8 +66,13 @@ that account controls the bot.
    Verified, except in a `#verify` channel that everyone can see but not
    type in.
 4. Create a private mod channel (for example `#verification-log`) that the bot can post in.
-5. Turn on Developer Mode (**User Settings → Advanced**) so you can right-click
-   and **Copy ID** on the server, the Verified role and the mod channel.
+5. Decide which roles are **bot admins** (for example `Owner` and
+   `Moderator`). Only members with one of these roles, plus the server owner,
+   can use the bot's commands and its Approve/Deny buttons. Discord
+   permissions don't count here, not even Administrator. Only the roles you list do.
+6. Turn on Developer Mode (**User Settings → Advanced**) so you can right-click
+   and **Copy ID** on the server, the Verified role, the mod channel and each
+   bot-admin role.
 
 ### 3. Configure
 
@@ -152,8 +163,20 @@ Verify button.
 ## Day to day
 
 - **Held for review:** a message appears in the mod channel explaining why,
-  with **Approve** and **Deny** buttons. Only people with Manage Roles can
-  use them, and the bot checks that on every click.
+  with **Approve** and **Deny** buttons. Only bot admins can use them, and
+  the bot checks that on every click.
+- **Manually verifying someone:** an admin can skip all checks for a person
+  they vouch for. Use `/verify-member member:@them note:why`, or right-click
+  the member → **Apps → Verify member**. Only bot admins can do this. Every
+  manual verification is posted to the mod log with the admin's name, and the
+  admin is also named in Discord's audit log. If the person was waiting for
+  review, that review closes.
+- **Changing who's a bot admin:** edit `ADMIN_ROLE_IDS` in `.env`, then run
+  `docker compose up -d`. Changes to *who holds* those roles take effect
+  immediately, with no restart. Bot commands are visible to every member
+  (non-admins get "Only bot admins can do that"). To hide them, go to **Server
+  Settings → Integrations → HollowWarden**. That setting only controls
+  visibility. Access is always decided by the bot.
 - **Updating:** `git pull && docker compose up -d --build`.
 - **Bot token leaked?** Reset it immediately in the developer portal,
   replace `secrets/discord_bot_token`, and run `docker compose up -d`.
@@ -173,7 +196,7 @@ Verify button.
 | XSS, clickjacking, MIME sniffing | No JavaScript, everything escaped, a strict CSP (`default-src 'none'`, with the one stylesheet allowed by its hash), and `frame-ancestors 'none'`. |
 | Secrets showing up in logs | Access logging is off. The bot never logs tokens, codes or IPs, and secrets are hidden from object reprs. |
 | Brute force and floods | Per-IP limits on the website and per-user limits on the Verify button. The rate limiter's memory is capped. CAPTCHA allows 3 attempts. |
-| Over-privileged bot | No privileged intents. Needs only Manage Roles plus messaging permissions. Refuses to grant a dangerous role. Leaves any server that isn't yours. Slash command permissions are checked again in code. |
+| Over-privileged bot | No privileged intents. Needs only Manage Roles plus messaging permissions. Refuses to grant a dangerous role. Leaves any server that isn't yours. Bot commands and review buttons check for your chosen admin roles in code on every use. `@everyone` and the Verified role can't be made admin roles. |
 | Compromised container | Runs as a non-root user with a read-only filesystem, all Linux capabilities dropped, `no-new-privileges`, and memory and process limits. No published ports. Secrets are files, not environment variables. |
 | Malicious or tampered dependency | Only three direct dependencies. All packages are pinned by version *and* hash (`--require-hashes`), and builds install wheels only. |
 
@@ -189,6 +212,17 @@ Verify button.
 - **Tell your friends what's collected.** In web mode, the site records a
   one-way hash of the IP each person verifies from, for up to 180 days, to
   catch alt accounts. Being upfront about it is good practice and builds trust.
+
+## Terms and privacy
+
+- [Terms of Service](TERMS.md)
+- [Privacy Policy](PRIVACY.md)
+
+These describe what this bot actually does with its default settings. If you
+change `IP_RETENTION_DAYS` or the logging limits in `docker-compose.yml`,
+update the numbers in `PRIVACY.md` to match. The Discord developer portal
+(**General Information**) has fields for a Terms of Service URL and a
+Privacy Policy URL. You can paste the GitHub links to these files there.
 
 ## Development
 

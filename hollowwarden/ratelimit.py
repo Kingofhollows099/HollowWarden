@@ -19,10 +19,16 @@ class RateLimiter:
         self.windowSeconds = windowSeconds
         self.maxKeys = maxKeys
         self._events: OrderedDict[object, deque[float]] = OrderedDict()
+        self._lastPrune = float("-inf")
 
     def allow(self, key: object, now: float | None = None) -> bool:
         now = time.monotonic() if now is None else now
         cutoff = now - self.windowSeconds
+        # Sweep out idle keys once per window, so entries don't stay in memory
+        # after their window has passed.
+        if now - self._lastPrune >= self.windowSeconds:
+            self._pruneExpired(cutoff)
+            self._lastPrune = now
 
         timestamps = self._events.get(key)
         if timestamps is None:

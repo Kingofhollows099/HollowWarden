@@ -33,6 +33,15 @@ services:
     mem_limit: 256m                # a leak or attack can't starve your other services
     cpus: 1.0
 
+    # Logs include Discord user IDs. Docker keeps logs forever by default; this
+    # caps them at about 30 MB, so old entries roll off instead of piling up.
+    # The privacy policy relies on this.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     # No `ports:` section on purpose. The container isn't reachable from your
     # LAN or the internet directly; only Nginx Proxy Manager can reach it,
     # over the shared Docker network below.

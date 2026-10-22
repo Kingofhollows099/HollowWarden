@@ -165,15 +165,37 @@ class HollowWardenBot(discord.Client):
         self.add_view(VerifyPanelView())
         self.add_dynamic_items(ReviewButton)
 
+        # Who may use these is decided by ADMIN_ROLE_IDS, checked in code on
+        # every use (see isBotAdmin). They're deliberately not hidden with
+        # Discord's default_permissions: that would key visibility to a
+        # Discord permission rather than your chosen roles, and the two would
+        # drift apart. To hide them from regular members anyway, use Server
+        # Settings → Integrations; that only affects visibility, not access.
         @app_commands.command(name="verification-panel", description="Post the verification button in this channel")
-        @app_commands.default_permissions(manage_guild=True)
         @app_commands.guild_only()
         async def verificationPanelCommand(interaction: discord.Interaction) -> None:
             await self.handlePanelCommand(interaction)
 
+        @app_commands.command(name="verify-member", description="Verify a member without making them pass a check")
+        @app_commands.describe(member="Who to verify", note="Why, shown in the mod log")
+        @app_commands.guild_only()
+        async def verifyMemberCommand(
+            interaction: discord.Interaction,
+            member: discord.Member,
+            note: app_commands.Range[str, 1, 200] | None = None,
+        ) -> None:
+            await self.handleManualVerify(interaction, member, note)
+
+        # The same action from a member's right-click menu (Apps → Verify member).
+        @app_commands.context_menu(name="Verify member")
+        @app_commands.guild_only()
+        async def verifyMemberMenu(interaction: discord.Interaction, member: discord.Member) -> None:
+            await self.handleManualVerify(interaction, member, None)
+
         homeGuild = discord.Object(id=self.settings.guildId)
         # Registered only in your server, never globally.
-        self.tree.add_command(verificationPanelCommand, guild=homeGuild)
+        for command in (verificationPanelCommand, verifyMemberCommand, verifyMemberMenu):
+            self.tree.add_command(command, guild=homeGuild)
         await self.tree.sync(guild=homeGuild)
 
     async def on_ready(self) -> None:
@@ -202,6 +224,9 @@ class HollowWardenBot(discord.Client):
             self.getVerifiedRole()
         except UnsafeRoleError as error:
             log.error("%s", error)
+        missingRoleIds = [roleId for roleId in self.settings.adminRoleIds if guild.get_role(roleId) is None]
+        if missingRoleIds:
+            log.error("ADMIN_ROLE_IDS contains roles that don't exist: %s", ", ".join(map(str, missingRoleIds)))
         if guild.get_channel(self.settings.modChannelId) is None:
             log.error("MOD_CHANNEL_ID %s is not a channel the bot can see", self.settings.modChannelId)
 
@@ -228,6 +253,20 @@ class HollowWardenBot(discord.Client):
     def isHomeGuild(self, interaction: discord.Interaction) -> bool:
         return interaction.guild_id == self.settings.guildId
 
+    def isBotAdmin(self, interaction: discord.Interaction) -> bool:
+        """True if this person holds one of the ADMIN_ROLE_IDS roles.
+
+        Discord's own permissions (even Administrator) don't count: only the
+        roles you chose do. The server owner is the one exception, since they
+        can give themselves any role anyway, and leaving them out would only
+        risk locking you out of your own bot.
+        """
+        if not self.isHomeGuild(interaction) or not isinstance(interaction.user, discord.Member):
+            return False
+        if interaction.guild is not None and interaction.user.id == interaction.guild.owner_id:
+            return True
+        return any(role.id in self.settings.adminRoleIds for role in interaction.user.roles)
+
     # DiscordGateway implementation (used by Verifier)
 
     async def getMemberState(self, userId: int) -> MemberState:
@@ -241,11 +280,11 @@ class HollowWardenBot(discord.Client):
         hasRole = any(role.id == self.settings.verifiedRoleId for role in member.roles)
         return MemberState(isMember=True, hasVerifiedRole=hasRole)
 
-    async def grantVerifiedRole(self, userId: int) -> None:
+    async def grantVerifiedRole(self, userId: int, auditReason: str | None = None) -> None:
         role = self.getVerifiedRole()
         guild = role.guild
         member = await guild.fetch_member(userId)
-        await member.add_roles(role, reason="Passed HollowWarden verification")
+        await member.add_roles(role, reason=auditReason or "Passed HollowWarden verification")
 
     async def postModLog(self, message: str) -> None:
         channel = await self.getModChannel()
@@ -281,10 +320,8 @@ class HollowWardenBot(discord.Client):
     # Interaction handlers
 
     async def handlePanelCommand(self, interaction: discord.Interaction) -> None:
-        # default_permissions only sets the default; server admins can change
-        # who sees the command, so the permission is checked again here.
-        if not self.isHomeGuild(interaction) or not interaction.permissions.manage_guild:
-            await interaction.response.send_message("⚠  You don't have permission to do that.", ephemeral=True)
+        if not self.isBotAdmin(interaction):
+            await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
             return
         embed = discord.Embed(
             title="Verification",
@@ -393,11 +430,41 @@ class HollowWardenBot(discord.Client):
             return
         await interaction.followup.send(OUTCOME_MESSAGES[outcome], ephemeral=True)
 
+    async def handleManualVerify(
+        self, interaction: discord.Interaction, member: discord.Member, note: str | None
+    ) -> None:
+        if not self.isBotAdmin(interaction):
+            await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # One line, no Markdown tricks, so a note can't disguise itself as
+        # extra log entries in the mod channel.
+        cleanNote = discord.utils.escape_markdown(" ".join(note.split())) if note else None
+        try:
+            outcome = await self.verifier.manualVerify(member.id, interaction.user.id, cleanNote)
+        except UnsafeRoleError as error:
+            await interaction.followup.send(f"⚠  {error}", ephemeral=True)
+            return
+        except Exception:
+            log.exception("manual verification of %s failed", member.id)
+            await interaction.followup.send("⚠  Couldn't verify them. Check the bot's logs.", ephemeral=True)
+            return
+
+        if outcome is Outcome.VERIFIED:
+            # Any CAPTCHA they had open is now pointless.
+            self.captchaChallenges.pop(member.id, None)
+            await interaction.followup.send(f"✓  Verified {member.mention}.", ephemeral=True)
+        elif outcome is Outcome.ALREADY_VERIFIED:
+            await interaction.followup.send(f"✓  {member.mention} is already verified.", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠  That person isn't in the server.", ephemeral=True)
+
     async def handleReviewDecision(self, interaction: discord.Interaction, userId: int, approve: bool) -> None:
         # Checked on every click, not just by channel visibility: if the mod
         # channel's permissions are ever loosened, the buttons stay locked.
-        if not self.isHomeGuild(interaction) or not interaction.permissions.manage_roles:
-            await interaction.response.send_message("⚠  Only moderators can do that.", ephemeral=True)
+        if not self.isBotAdmin(interaction):
+            await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
             return
         await interaction.response.defer()
         try:

@@ -45,7 +45,7 @@ OAUTH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,128}$")
 # has Path=/ and has no Domain, so a sibling subdomain can't overwrite it.
 NONCE_COOKIE_NAME = "__Host-hw_nonce"
 OAUTH_STATE_LIFETIME_SECONDS = 600
-CLIENT_IP_KEY = "hollowwarden.clientIp"
+IP_HASH_KEY = "hollowwarden.ipHash"
 
 # The Clipboard Cleaner theme: dark navy, flat, a 4px radius, one raspberry
 # accent kept for status. Custom property names match the design system's
@@ -186,9 +186,12 @@ class VerificationSite:
                 "match your Nginx Proxy Manager setup"
             )
             return renderPage(400, "Connection problem", "Your connection couldn't be checked. Please tell a moderator.")
-        if not self.rateLimiter.allow(clientIp):
+        # From here on only the hash is used, rate limiting included, so the
+        # raw IP never outlives this request, not even in memory.
+        ipHash = hashIp(self.settings.ipHashKey, clientIp)
+        if not self.rateLimiter.allow(ipHash):
             return renderPage(429, "Slow down", "Too many attempts. Please wait a few minutes and try again.")
-        request[CLIENT_IP_KEY] = clientIp
+        request[IP_HASH_KEY] = ipHash
         return await handler(request)
 
     async def handleHealth(self, request: web.Request) -> web.Response:
@@ -265,7 +268,7 @@ class VerificationSite:
                 )
             )
 
-        ipHash = hashIp(self.settings.ipHashKey, request[CLIENT_IP_KEY])
+        ipHash = request[IP_HASH_KEY]
         outcome = await self.verifier.completeWeb(expectedUserId, ipHash)
         title, message, statusLine = OUTCOME_PAGES[outcome]
         return self.finish(renderPage(200, title, message, statusLine))
