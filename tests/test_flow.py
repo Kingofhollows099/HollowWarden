@@ -198,6 +198,7 @@ async def webClient(aiohttp_client, settings, storage):
     oauth = FakeOAuth()
     site = VerificationSite(settings.web, storage, Verifier(settings, storage, gateway), oauth, lambda: True)
     client = await aiohttp_client(site.createApp())
+    client.site = site
     client.gateway = gateway
     client.oauth = oauth
     client.storage = storage
@@ -293,6 +294,11 @@ class TestWebFlow:
             (await webClient.get("/verify?t=x", headers={"X-Real-IP": "203.0.113.99"})).status for _ in range(25)
         ]
         assert statuses[-1] == 429
+
+    async def test_rawIpNotKeptInMemory(self, webClient):
+        await webClient.get("/verify?t=x", headers={"X-Real-IP": "203.0.113.77"})
+        trackedKeys = list(webClient.site.rateLimiter._events)
+        assert trackedKeys and "203.0.113.77" not in trackedKeys
 
     async def test_missingProxyHeaderFailsClosed(self, webClient):
         response = await webClient.get("/verify?t=x")

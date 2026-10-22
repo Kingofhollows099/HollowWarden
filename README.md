@@ -213,6 +213,17 @@ Verify button.
   one-way hash of the IP each person verifies from, for up to 180 days, to
   catch alt accounts. Being upfront about it is good practice and builds trust.
 
+## Terms and privacy
+
+- [Terms of Service](TERMS.md)
+- [Privacy Policy](PRIVACY.md)
+
+These describe what this bot actually does with its default settings. If you
+change `IP_RETENTION_DAYS` or the logging limits in `docker-compose.yml`,
+update the numbers in `PRIVACY.md` to match. The Discord developer portal
+(**General Information**) has fields for a Terms of Service URL and a
+Privacy Policy URL. You can paste the GitHub links to these files there.
+
 ## Development
 
 ```bash

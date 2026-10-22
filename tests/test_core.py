@@ -144,6 +144,12 @@ class TestRateLimiter:
         assert limiter.allow("b", now=2)
         assert limiter.allow("a", now=11)
 
+    def test_idleKeysAreForgotten(self):
+        limiter = RateLimiter(maxEvents=5, windowSeconds=10)
+        limiter.allow("visitor", now=0)
+        limiter.allow("other", now=25)
+        assert "visitor" not in limiter._events
+
     def test_keyCountIsBounded(self):
         limiter = RateLimiter(maxEvents=1, windowSeconds=10, maxKeys=3)
         for key in range(100):
