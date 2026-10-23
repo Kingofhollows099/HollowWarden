@@ -86,6 +86,35 @@ class DiscordOAuth:
             raise OAuthError("user lookup returned an unexpected payload")
         return int(userId)
 
+    async def credentialsAreValid(self) -> bool:
+        """Check the client ID and secret without needing a user to log in.
+
+        A client-credentials request only succeeds when both are right. The
+        token it returns belongs to the app's owner, isn't needed, and is
+        revoked straight away.
+        """
+        if self._session is None:
+            raise RuntimeError("DiscordOAuth.start() has not been called")
+        clientAuth = aiohttp.BasicAuth(self.clientId, self._clientSecret)
+        async with self._session.post(
+            f"{API_BASE_URL}/oauth2/token",
+            data={"grant_type": "client_credentials", "scope": "identify"},
+            auth=clientAuth,
+        ) as tokenResponse:
+            if tokenResponse.status in (400, 401):
+                # A wrong ID or secret is "invalid_client". Anything else is
+                # some other problem, and shouldn't be reported as a bad secret.
+                errorPayload = await tokenResponse.json(content_type=None)
+                if isinstance(errorPayload, dict) and errorPayload.get("error") == "invalid_client":
+                    return False
+            if tokenResponse.status != 200:
+                raise OAuthError(f"Discord answered HTTP {tokenResponse.status}")
+            tokenPayload = await tokenResponse.json()
+        accessToken = tokenPayload.get("access_token")
+        if isinstance(accessToken, str):
+            await self._revoke(accessToken, clientAuth)
+        return True
+
     async def _revoke(self, accessToken: str, clientAuth: aiohttp.BasicAuth) -> None:
         assert self._session is not None
         try:

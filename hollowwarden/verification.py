@@ -28,6 +28,9 @@ class Outcome(enum.Enum):
     PENDING_REVIEW = "pending_review"
     ALREADY_VERIFIED = "already_verified"
     NOT_MEMBER = "not_member"
+    # Verification couldn't finish because Discord refused something the bot
+    # needed (usually a missing permission). Nothing was left half-done.
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -37,13 +40,21 @@ class MemberState:
 
 
 class DiscordGateway(Protocol):
+    """Discord access for the Verifier.
+
+    postModLog and postReview never raise for Discord errors. A mod-channel
+    message is a side effect, and a missing permission there must not turn a
+    finished verification into an error. They log the cause instead, and
+    postReview reports whether the message was actually posted.
+    """
+
     async def getMemberState(self, userId: int) -> MemberState: ...
 
     async def grantVerifiedRole(self, userId: int, auditReason: str | None = None) -> None: ...
 
     async def postModLog(self, message: str) -> None: ...
 
-    async def postReview(self, userId: int, reasons: list[str], needsDecision: bool) -> None: ...
+    async def postReview(self, userId: int, reasons: list[str], needsDecision: bool) -> bool: ...
 
 
 def accountCreatedAt(userId: int) -> float:
@@ -104,12 +115,22 @@ class Verifier:
 
         if self.settings.flaggedAction == "allow":
             await self.gateway.grantVerifiedRole(userId)
+            # The role is already granted, so a failed alert is only logged
+            # (by the gateway). It doesn't change the outcome.
             await self.gateway.postReview(userId, reasons, needsDecision=False)
             log.info("user %s verified by %s with flags", userId, method)
             return Outcome.VERIFIED
 
+        # Post first, record second. The review message is the only way a
+        # moderator can act on a review, so if it can't be posted the member
+        # must not be marked pending: they'd be stuck in a review nobody can
+        # see, and every retry would answer "pending". (A moderator clicking
+        # in the moment between the two steps would just see "Already
+        # handled" and could click again.)
+        if not await self.gateway.postReview(userId, reasons, needsDecision=True):
+            log.warning("user %s could not be held for review: the review message couldn't be posted", userId)
+            return Outcome.UNAVAILABLE
         await self.storage.addPendingReview(userId, now=currentTime)
-        await self.gateway.postReview(userId, reasons, needsDecision=True)
         log.info("user %s held for moderator review", userId)
         return Outcome.PENDING_REVIEW
 
@@ -131,8 +152,10 @@ class Verifier:
         """An admin vouches for someone directly, so none of the checks run.
 
         Every manual verification is posted to the mod log with the admin's
-        name. A bypass is exactly what a compromised or careless admin
-        account would use, so it should never happen silently.
+        name, and is always written to the bot's own log too, so a record
+        survives even if the mod-channel post fails. A bypass is exactly what
+        a compromised or careless admin account would use, so it should never
+        happen silently.
         """
         memberState = await self.gateway.getMemberState(userId)
         if not memberState.isMember:

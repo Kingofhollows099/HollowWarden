@@ -11,7 +11,7 @@ import sys
 
 from aiohttp import web
 
-from .bot import HollowWardenBot
+from .bot import HollowWardenBot, StartupError
 from .config import ConfigError, Settings, loadSettings
 from .oauth import DiscordOAuth
 from .storage import Storage
@@ -44,6 +44,7 @@ async def run(settings: Settings) -> None:
         if settings.web is not None:
             oauth = DiscordOAuth(settings.web.clientId, settings.web.clientSecret, settings.web.redirectUri)
             await oauth.start()
+            bot.oauth = oauth
             site = VerificationSite(settings.web, storage, bot.verifier, oauth, bot.is_ready)
             # access_log=None: access logs would record visitors' IPs and the
             # one-time tokens and OAuth codes in the URLs.
@@ -93,6 +94,9 @@ def cli() -> None:
     except ConfigError as error:
         log.error("configuration error: %s", error)
         sys.exit(2)
+    except StartupError as error:
+        log.error("%s", error)
+        sys.exit(3)
 
 
 if __name__ == "__main__":
