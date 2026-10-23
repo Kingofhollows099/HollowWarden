@@ -152,6 +152,21 @@ matches your Cloudflare DNS record:
     fake `CF-Connecting-IP` to dodge alt detection; or
   - configure NPM to restore the real IP from Cloudflare and keep `X-Real-IP`.
 
+**Quick check:** on a phone with **Wi-Fi off**, open
+`https://verify.example.com/selftest` (your domain). It shows one word about
+your phone's connection, never the address itself:
+
+- `ok`: the bot sees visitors' real public IPs. This is what you want.
+- `untrusted-proxy`: NPM's address isn't in `TRUSTED_PROXIES`, so the header is
+  ignored. Set `TRUSTED_PROXIES` to the output of
+  `docker network inspect <NPM_NETWORK> --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`.
+- `private`: NPM sent a private address in the header. From mobile data,
+  that means the header isn't carrying the visitor's IP. Check `CLIENT_IP_HEADER`.
+
+Run it from mobile data specifically. From inside your home network, `private`
+is normal, because the request never leaves it (router NAT loopback or local
+DNS). `/test-config` runs the same check from the server and says which case it found.
+
 **Test it before trusting it.** Verify one test account on home Wi-Fi and a
 second on mobile data. They should not be flagged. Then verify a third
 account on home Wi-Fi. It *should* be flagged as sharing a network with the

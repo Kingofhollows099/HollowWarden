@@ -180,9 +180,14 @@ class TestSelfTestInterpretation:
         findings = interpretSelfTest(webSettings, 200, "ok", behindCloudflare=False)
         assert [finding.level for finding in findings] == [OK, OK]
 
-    def test_privateIpIsAWarning(self, webSettings):
+    def test_privateIpFromTrustedProxyIsAWarning(self, webSettings):
         findings = interpretSelfTest(webSettings, 200, "private", behindCloudflare=False)
         assert [finding.level for finding in findings] == [OK, WARNING]
+        assert "Wi-Fi off" in findings[1].text and f"{webSettings.publicBaseUrl}/selftest" in findings[1].text
+
+    def test_untrustedProxyIsAProblem(self, webSettings):
+        findings = interpretSelfTest(webSettings, 200, "untrusted-proxy", behindCloudflare=False)
+        assert [finding.level for finding in findings] == [OK, ERROR]
 
     def test_cloudflareWithRealIpHeaderIsAWarning(self, webSettings):
         findings = interpretSelfTest(webSettings, 200, "ok", behindCloudflare=True)
@@ -215,12 +220,15 @@ class TestWebsiteCheckEndToEnd:
         assert [finding.level for finding in findings] == [ERROR]
         assert "didn't send the X-Real-IP header" in findings[0].text
 
-    async def test_wrongTrustedProxiesShowsPrivateIp(self, aiohttp_server, unused_tcp_port_factory, tmp_path, storage):
+    async def test_wrongTrustedProxiesIsAProblem(self, aiohttp_server, unused_tcp_port_factory, tmp_path, storage):
+        # The check connects from 127.0.0.1, standing in for NPM, which isn't
+        # in TRUSTED_PROXIES here: the header gets ignored.
         findings = await self.runAgainstLocalSite(
             aiohttp_server, unused_tcp_port_factory, tmp_path, storage, TRUSTED_PROXIES="10.0.0.0/8"
         )
-        assert [finding.level for finding in findings] == [OK, WARNING]
-        assert "private address" in findings[1].text
+        assert [finding.level for finding in findings] == [OK, ERROR]
+        assert "isn't in TRUSTED_PROXIES" in findings[1].text
+        assert "docker network inspect" in findings[1].text
 
     async def test_unreachableSiteIsAWarning(self, unused_tcp_port_factory, tmp_path):
         port = unused_tcp_port_factory()
@@ -241,6 +249,15 @@ class TestSelfTestPage:
         privateResponse = await client.get("/selftest", headers={"X-Real-IP": "10.1.2.3"})
         assert await publicResponse.text() == "ok"
         assert await privateResponse.text() == "private"
+
+    async def test_reportsWhenProxyIsntTrusted(self, aiohttp_client, tmp_path, storage):
+        # The test client connects from 127.0.0.1, which isn't trusted here,
+        # so its X-Real-IP is ignored and its own private address is used.
+        settings = loadSettings(webEnviron(tmp_path, TRUSTED_PROXIES="10.0.0.0/8"))
+        site = VerificationSite(settings.web, storage, Verifier(settings, storage, FakeGateway()), FakeOAuth(), lambda: True)
+        client = await aiohttp_client(site.createApp())
+        response = await client.get("/selftest", headers={"X-Real-IP": "1.1.1.1"})
+        assert await response.text() == "untrusted-proxy"
 
 
 class TestOtherChecks:

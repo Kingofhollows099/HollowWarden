@@ -39,6 +39,19 @@ def hashIp(ipHashKey: bytes, rawIp: str) -> str:
     return hmac.new(ipHashKey, normalizeIp(rawIp).encode("ascii"), hashlib.sha256).hexdigest()
 
 
+def isTrustedProxy(
+    peerIp: str | None, trustedProxies: Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network]
+) -> bool:
+    """True if the connection itself comes from one of TRUSTED_PROXIES."""
+    if not peerIp:
+        return False
+    try:
+        peerAddress = ipaddress.ip_address(peerIp)
+    except ValueError:
+        return False
+    return any(peerAddress in network for network in trustedProxies)
+
+
 def resolveClientIp(
     peerIp: str | None,
     headers: Mapping[str, str],
@@ -58,7 +71,7 @@ def resolveClientIp(
     except ValueError:
         return None
 
-    if not any(peerAddress in network for network in trustedProxies):
+    if not isTrustedProxy(peerIp, trustedProxies):
         return str(peerAddress)
 
     headerValue = headers.get(clientIpHeader or "", "").strip()
