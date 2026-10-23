@@ -269,3 +269,73 @@ class TestRejoiningServer:
         await bot.on_guild_join(otherGuild)
         otherGuild.leave.assert_awaited_once()
         bot.tree.sync.assert_not_awaited()
+
+
+def invalidEmojiError():
+    """What Discord actually answers when a button's emoji isn't a real emoji."""
+    return discord.HTTPException(
+        SimpleNamespace(status=400, reason="Bad Request"),
+        {
+            "code": 50035,
+            "message": "Invalid Form Body",
+            "errors": {
+                "components": {
+                    "0": {"components": {"0": {"emoji": {"name": {"_errors": [{"code": "BUTTON_COMPONENT_INVALID_EMOJI", "message": "Invalid emoji"}]}}}}}
+                }
+            },
+        },
+    )
+
+
+class TestButtonsDiscordAccepts:
+    """Discord rejects a whole message if any button's emoji isn't a real
+    emoji. ✓ (U+2713) looks like one but isn't, and it broke every review."""
+
+    # Emoji confirmed to work on buttons in production. Anything new must be
+    # checked against Discord before it's added here.
+    KNOWN_GOOD_EMOJI = {"▶"}
+
+    async def test_everyButtonUsesNoEmojiOrAKnownGoodOne(self):
+        from hollowwarden.bot import CaptchaView, ReviewButton, VerifyPanelView
+
+        buttons = list(VerifyPanelView().children) + list(CaptchaView().children)
+        buttons += [ReviewButton("approve", OLD_USER).item, ReviewButton("deny", OLD_USER).item]
+        for button in buttons:
+            assert button.emoji is None or button.emoji.name in self.KNOWN_GOOD_EMOJI, button.label
+
+    async def test_reviewButtonsKeepTheirSymbolsInTheLabel(self):
+        from hollowwarden.bot import ReviewButton
+
+        assert ReviewButton("approve", OLD_USER).item.label == "✓ Approve"
+        assert ReviewButton("deny", OLD_USER).item.label == "⚠ Deny"
+
+
+class TestReviewPostCheck:
+    async def test_rejectedReviewIsAProblemWithDiscordsReason(self, bot, caplog):
+        bot.getModChannel = AsyncMock(return_value=modChannelRaising(invalidEmojiError()))
+        with caplog.at_level(logging.ERROR):
+            finding = await bot.checkReviewPost()
+        assert finding.level == "error"
+        assert "Invalid emoji" in finding.text and "Verification unavailable" in finding.text
+        assert any("code 50035" in message and "Invalid emoji" in message for message in errorMessages(caplog))
+
+    async def test_samplePostedThenDeleted(self, bot):
+        sentMessage = SimpleNamespace(delete=AsyncMock())
+        channel = MagicMock()
+        channel.send = AsyncMock(return_value=sentMessage)
+        bot.getModChannel = AsyncMock(return_value=channel)
+
+        finding = await bot.checkReviewPost()
+
+        assert finding.level == "ok"
+        sentMessage.delete.assert_awaited_once()
+        # The sample's buttons can't be clicked, even if deleting fails.
+        view = channel.send.await_args.kwargs["view"]
+        assert all(reviewButton.item.disabled for reviewButton in view.children)
+
+    async def test_undeletableSampleIsAWarning(self, bot):
+        sentMessage = SimpleNamespace(delete=AsyncMock(side_effect=forbidden(50013, "Missing Permissions")))
+        channel = MagicMock()
+        channel.send = AsyncMock(return_value=sentMessage)
+        bot.getModChannel = AsyncMock(return_value=channel)
+        assert (await bot.checkReviewPost()).level == "warning"
