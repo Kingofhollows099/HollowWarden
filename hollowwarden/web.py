@@ -49,6 +49,7 @@ OAUTH_STATE_LIFETIME_SECONDS = 600
 IP_HASH_KEY = "hollowwarden.ipHash"
 IP_IS_PUBLIC_KEY = "hollowwarden.ipIsPublic"
 PEER_IS_TRUSTED_KEY = "hollowwarden.peerIsTrusted"
+CLOUDFLARE_IP_MISMATCH_KEY = "hollowwarden.cloudflareIpMismatch"
 
 # The Clipboard Cleaner theme: dark navy, flat, a 4px radius, one raspberry
 # accent kept for status. Custom property names match the design system's
@@ -203,7 +204,21 @@ class VerificationSite:
         request[IP_HASH_KEY] = ipHash
         request[IP_IS_PUBLIC_KEY] = ipaddress.ip_address(clientIp).is_global
         request[PEER_IS_TRUSTED_KEY] = isTrustedProxy(request.remote, self.settings.trustedProxies)
+        request[CLOUDFLARE_IP_MISMATCH_KEY] = self.differsFromCloudflare(request, clientIp)
         return await handler(request)
+
+    @staticmethod
+    def differsFromCloudflare(request: web.Request, clientIp: str) -> bool:
+        """True if the request came through Cloudflare but the IP we resolved
+        isn't the visitor IP Cloudflare reported, meaning we got a Cloudflare
+        server's address. Only /selftest uses this, and only as a yes or no."""
+        cloudflareIp = request.headers.get("CF-Connecting-IP", "").strip()
+        if not cloudflareIp:
+            return False
+        try:
+            return ipaddress.ip_address(cloudflareIp) != ipaddress.ip_address(clientIp)
+        except ValueError:
+            return False
 
     async def handleHealth(self, request: web.Request) -> web.Response:
         return web.Response(text="ok")
@@ -220,8 +235,13 @@ class VerificationSite:
         - "private": a trusted proxy reported a private address. That happens
           when the request started inside your own network (NAT loopback or
           local DNS) and only affects tests run from there.
+        - "cloudflare-ip": the request came through Cloudflare, but the IP we
+          got is a Cloudflare server's, not the visitor's. Every member would
+          look like they share a handful of addresses.
         """
         if request[IP_IS_PUBLIC_KEY]:
+            if request[CLOUDFLARE_IP_MISMATCH_KEY]:
+                return web.Response(text="cloudflare-ip")
             return web.Response(text="ok")
         if not request[PEER_IS_TRUSTED_KEY]:
             return web.Response(text="untrusted-proxy")
