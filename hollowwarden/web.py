@@ -37,6 +37,7 @@ from .oauth import DiscordOAuth, OAuthError
 from .ratelimit import RateLimiter
 from .storage import Storage, sha256Hex
 from .verification import Outcome, Verifier
+from .vpnlist import VpnChecker
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ IP_HASH_KEY = "hollowwarden.ipHash"
 IP_IS_PUBLIC_KEY = "hollowwarden.ipIsPublic"
 PEER_IS_TRUSTED_KEY = "hollowwarden.peerIsTrusted"
 CLOUDFLARE_IP_MISMATCH_KEY = "hollowwarden.cloudflareIpMismatch"
+IS_VPN_KEY = "hollowwarden.isVpn"
 
 # The Clipboard Cleaner theme: dark navy, flat, a 4px radius, one raspberry
 # accent kept for status. Custom property names match the design system's
@@ -143,12 +145,14 @@ class VerificationSite:
         verifier: Verifier,
         oauth: DiscordOAuth,
         isBotReady: Callable[[], bool],
+        vpnChecker: VpnChecker | None = None,
     ) -> None:
         self.settings = settings
         self.storage = storage
         self.verifier = verifier
         self.oauth = oauth
         self.isBotReady = isBotReady
+        self.vpnChecker = vpnChecker
         self.rateLimiter = RateLimiter(maxEvents=20, windowSeconds=600)
 
     def createApp(self) -> web.Application:
@@ -202,6 +206,9 @@ class VerificationSite:
         if not self.rateLimiter.allow(ipHash):
             return renderPage(429, "Slow down", "Too many attempts. Please wait a few minutes and try again.")
         request[IP_HASH_KEY] = ipHash
+        # Checked here, while the raw IP still exists. Only the yes/no answer
+        # is kept for the rest of the request.
+        request[IS_VPN_KEY] = self.vpnChecker.isVpn(clientIp) if self.vpnChecker is not None else None
         request[IP_IS_PUBLIC_KEY] = ipaddress.ip_address(clientIp).is_global
         request[PEER_IS_TRUSTED_KEY] = isTrustedProxy(request.remote, self.settings.trustedProxies)
         request[CLOUDFLARE_IP_MISMATCH_KEY] = self.differsFromCloudflare(request, clientIp)
@@ -322,7 +329,7 @@ class VerificationSite:
             )
 
         ipHash = request[IP_HASH_KEY]
-        outcome = await self.verifier.completeWeb(expectedUserId, ipHash)
+        outcome = await self.verifier.completeWeb(expectedUserId, ipHash, isVpn=request[IS_VPN_KEY])
         title, message, statusLine = OUTCOME_PAGES[outcome]
         httpStatus = 503 if outcome is Outcome.UNAVAILABLE else 200
         return self.finish(renderPage(httpStatus, title, message, statusLine))

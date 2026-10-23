@@ -1,6 +1,6 @@
 # HollowWarden Privacy Policy
 
-**Effective date:** October 22, 2026
+**Effective date:** October 23, 2026
 
 HollowWarden is a Discord bot that checks new members before they get access
 to a private Discord server. It's run by that server's owner (the
@@ -34,15 +34,24 @@ record is kept by Discord under Discord's rules.
 | Data | Why | How long it's kept |
 |---|---|---|
 | A **one-way hash of your IP address**, linked to your Discord ID | To spot alternate accounts, and banned members coming back, that verify from the same internet connection | Deleted automatically **180 days** after it was last used, unless the operator sets a shorter or longer period |
-| Your **IP address**, briefly | To hash it (see below) | Only while your request is being handled. It's never written to disk or kept in memory afterwards. Retry limits use the hash, which is kept in memory for about 10 to 20 minutes. |
+| Your **IP address**, briefly | To hash it, and to check whether it belongs to a known VPN (see below) | Only while your request is being handled. It's never written to disk or kept in memory afterwards. Retry limits use the hash, which is kept in memory for about 10 to 20 minutes. |
 | One **cookie** (`__Host-hw_nonce`) | Security: it makes sure the Discord login finishes in the same browser it started in | Up to 10 minutes. It's deleted as soon as you finish. |
 | Your **Discord ID** from the "Log in with Discord" step | To confirm the person logging in is the person who clicked Verify | Used once, as above |
+| **Whether you connected through a known VPN** (yes or no) | A VPN hides which network you're on, so a moderator takes a quick look instead | Not stored by the bot. If you're held for review, the moderator message says so (see section 3). |
 
 **About the IP hash.** HollowWarden **never stores your IP address.** It
 stores a keyed hash (HMAC-SHA256 with a secret key), which can't be turned
 back into your IP address without that key. For IPv6, only the first half of
 the address (the /64 network prefix) is used. That's the part that usually
 identifies a household's connection rather than a single device.
+
+**About the VPN check.** The bot compares your IP address against a public
+list of IP ranges that belong to VPN services. The list is downloaded to the
+operator's server, and **the check happens there**: your IP is never sent to
+a VPN-detection service or anyone else. Downloading the list doesn't send
+any information about you. If you're on a VPN, you're not blocked. A
+moderator reviews your verification instead. The operator can turn this check
+off.
 
 **About the Discord login.** The bot asks Discord only for the `identify`
 permission. That shows it your Discord ID and basic profile, but **not**
@@ -65,7 +74,8 @@ it's not used for tracking or advertising.
 
 - **The server's moderators and admins** can see the moderator channel. If
   you're held for review, they'll see why, for example "account is 2 days old"
-  or "verified from the same network as @someone". **This means moderators
+  or "verified from the same network as @someone" or "connected through a known
+  VPN network". **This means moderators
   can learn that two accounts verified from the same internet connection**
   (say, siblings or roommates). They never see the IP address itself.
 - **The operator** runs the computer the bot lives on, so they can access its
@@ -103,8 +113,8 @@ possible, so there's little to lose if something goes wrong.
 
 ## 6. Your choices and rights
 
-- **Don't want your IP hashed?** Ask a server admin to verify you manually
-  instead. Admins can let you in without running any checks.
+- **Don't want your IP hashed or checked?** Ask a server admin to verify you
+  manually instead. Admins can let you in without running any checks.
 - **See or delete your data.** Message a server admin or the operator
   directly. Please don't open a public GitHub issue for this, because that
   would make your request public. The operator will tell you what's stored

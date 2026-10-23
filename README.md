@@ -16,6 +16,7 @@ Set `VERIFY_METHOD` in `.env`. You can switch at any time; restart the bot after
 | How it works | An image code shown privately in Discord | Log in with Discord on your own site |
 | Stops raid/spam bots | Yes | Yes |
 | Catches alt accounts and banned users returning | No | Yes, when they verify from the same home network |
+| Holds VPN users for review | No | Yes, for known VPN services (checked locally; IPs aren't sent anywhere) |
 | Exposed to the internet | **Nothing.** No web server runs at all | One small HTTPS site behind Nginx Proxy Manager |
 | Data stored about people | Nothing beyond pending reviews | A keyed hash of their IP (never the IP itself), deleted after 180 days |
 
@@ -207,6 +208,7 @@ server. It privately shows a report of problems, warnings and passed checks:
 - **Discord app settings:** Public Bot is off and, in web mode, the OAuth
   redirect is registered and the client secret is valid.
 - **Database:** it can be written to.
+- **VPN list (web mode):** it has downloaded and is up to date.
 - **Website (web mode):** the bot loads its own public page the way a
   member's browser would, checking DNS, HTTPS and Nginx Proxy Manager, and
   that visitor IPs are read correctly, including common Cloudflare mistakes.
@@ -264,6 +266,8 @@ Fix anything listed under **Problems**, then type `/verification-panel` in
 | Brute force and floods | Per-IP limits on the website and per-user limits on the Verify button. The rate limiter's memory is capped. CAPTCHA allows 3 attempts. |
 | Over-privileged bot | No privileged intents. Needs only Manage Roles plus messaging permissions. Refuses to grant a dangerous role. Leaves any server that isn't yours. Bot commands and review buttons check for your chosen admin roles in code on every use. `@everyone` and the Verified role can't be made admin roles. |
 | Compromised container | Runs as a non-root user with a read-only filesystem, all Linux capabilities dropped, `no-new-privileges`, and memory and process limits. No published ports. Secrets are files, not environment variables. |
+| Members' IPs leaked to a VPN-detection service | The VPN check runs on your server against a downloaded list. No visitor data is sent anywhere. |
+| A bad or tampered VPN list flags everyone | Downloaded over HTTPS only, with a size cap. It's rejected if it's suspiciously small (an error page or a truncated file), or if it covers more than 15% of the internet, and the last good list stays in use. Single ranges broader than a /12 are ignored. A list is only data, so it can't run code, and a match only holds a member for review. |
 | Malicious or tampered dependency | Only three direct dependencies. All packages are pinned by version *and* hash (`--require-hashes`), and builds install wheels only. |
 
 ### Known limitations
@@ -271,6 +275,14 @@ Fix anything listed under **Problems**, then type `/verification-panel` in
 - **VPNs and mobile data defeat IP matching.** A determined ban evader can
   verify from a different network. Alt detection catches the casual cases,
   which is most of them.
+- **VPN detection catches common VPN services, not everything.** It flags
+  addresses on [X4BNet's list of known VPN ranges](https://github.com/X4BNet/lists_vpn),
+  which the bot downloads daily and checks on your server. It doesn't catch
+  residential proxies, someone's own home connection used as a relay, or
+  iCloud Private Relay (left out deliberately, so ordinary iPhone users aren't
+  held). The list is IPv4 only, so IPv6 visitors aren't checked. A VPN user is
+  held for review, not blocked, because plenty of genuine members use one.
+  Turn the check off with `FLAG_VPN=false`.
 - **Households share an IP.** Siblings or roommates will be flagged as
   matching each other. That's why the default is `review`, not automatic denial.
 - **Image CAPTCHAs can be solved by AI.** CAPTCHA mode stops scripted raid

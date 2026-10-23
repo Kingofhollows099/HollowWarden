@@ -27,10 +27,11 @@ from discord import app_commands
 from .captcha import codesMatch, generateCode, renderCaptcha
 from .config import Settings
 from .diagnostics import ERROR, OK, WARNING, Finding, checkApplication, checkDatabase, checkOauthCredentials
-from .diagnostics import checkWebsite, formatReport
+from .diagnostics import checkVpnList, checkWebsite, formatReport
 from .ratelimit import RateLimiter
 from .storage import Storage
 from .oauth import DiscordOAuth
+from .vpnlist import VpnChecker
 from .verification import MemberState, Outcome, Verifier
 
 log = logging.getLogger(__name__)
@@ -179,6 +180,8 @@ class HollowWardenBot(discord.Client):
         # Set by the entry point in web mode, so /test-config can check the
         # OAuth credentials.
         self.oauth: DiscordOAuth | None = None
+        # Set by the entry point when VPN detection is on.
+        self.vpnChecker: VpnChecker | None = None
 
     async def setup_hook(self) -> None:
         self.add_view(VerifyPanelView())
@@ -397,6 +400,7 @@ class HollowWardenBot(discord.Client):
             if self.oauth is not None:
                 findings.append(await checkOauthCredentials(self.oauth))
             findings.extend(await checkWebsite(self.settings.web))
+            findings.append(checkVpnList(self.vpnChecker))
         return findings
 
     def describeSettings(self) -> str:

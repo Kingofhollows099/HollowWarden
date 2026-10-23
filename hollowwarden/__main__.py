@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 from aiohttp import web
 
@@ -15,6 +16,7 @@ from .bot import HollowWardenBot, StartupError
 from .config import ConfigError, Settings, loadSettings
 from .oauth import DiscordOAuth
 from .storage import Storage
+from .vpnlist import VpnChecker
 from .web import VerificationSite
 
 log = logging.getLogger("hollowwarden")
@@ -38,6 +40,7 @@ async def run(settings: Settings) -> None:
     bot = HollowWardenBot(settings, storage)
     oauth: DiscordOAuth | None = None
     webRunner: web.AppRunner | None = None
+    vpnRefreshTask: asyncio.Task | None = None
     purgeTask = asyncio.create_task(purgeLoop(storage, settings))
 
     try:
@@ -45,7 +48,14 @@ async def run(settings: Settings) -> None:
             oauth = DiscordOAuth(settings.web.clientId, settings.web.clientSecret, settings.web.redirectUri)
             await oauth.start()
             bot.oauth = oauth
-            site = VerificationSite(settings.web, storage, bot.verifier, oauth, bot.is_ready)
+            vpnChecker = None
+            if settings.web.vpnListUrls:
+                # Cached next to the database, on the only writable volume.
+                vpnChecker = VpnChecker(settings.web.vpnListUrls, Path(settings.databasePath).parent / "vpn-ranges.txt")
+                vpnChecker.loadCache()
+                vpnRefreshTask = asyncio.create_task(vpnChecker.refreshForever())
+                bot.vpnChecker = vpnChecker
+            site = VerificationSite(settings.web, storage, bot.verifier, oauth, bot.is_ready, vpnChecker)
             # access_log=None: access logs would record visitors' IPs and the
             # one-time tokens and OAuth codes in the URLs.
             webRunner = web.AppRunner(site.createApp(), access_log=None)
@@ -57,9 +67,11 @@ async def run(settings: Settings) -> None:
 
         await bot.start(settings.botToken)
     finally:
-        purgeTask.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await purgeTask
+        for backgroundTask in (purgeTask, vpnRefreshTask):
+            if backgroundTask is not None:
+                backgroundTask.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await backgroundTask
         if not bot.is_closed():
             await bot.close()
         if webRunner is not None:

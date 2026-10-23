@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .vpnlist import DEFAULT_VPN_LIST_URLS
+
 VERIFY_METHODS = ("captcha", "web")
 FLAGGED_ACTIONS = ("review", "allow")
 CLIENT_IP_HEADER_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,64}$")
@@ -39,6 +41,8 @@ class WebSettings:
     trustedProxies: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
     clientIpHeader: str | None
     ipRetentionDays: int
+    # Where to download VPN ranges from; empty means VPN detection is off.
+    vpnListUrls: tuple[str, ...]
     listenHost: str
     listenPort: int
 
@@ -168,6 +172,23 @@ def parseTrustedProxies(rawValue: str) -> tuple[ipaddress.IPv4Network | ipaddres
     return tuple(networks)
 
 
+def readVpnListUrls(environ: dict[str, str]) -> tuple[str, ...]:
+    flagVpn = environ.get("FLAG_VPN", "").strip().lower() or "true"
+    if flagVpn not in ("true", "false"):
+        raise ConfigError("FLAG_VPN must be true or false")
+    if flagVpn == "false":
+        return ()
+    rawUrls = environ.get("VPN_LIST_URLS", "").strip()
+    urls = tuple(url.strip() for url in rawUrls.split(",") if url.strip()) if rawUrls else DEFAULT_VPN_LIST_URLS
+    for url in urls:
+        parts = urlsplit(url)
+        # HTTPS only: over plain HTTP, anyone on the network path could swap
+        # in their own list and choose who gets flagged.
+        if parts.scheme != "https" or not parts.hostname:
+            raise ConfigError(f"VPN_LIST_URLS entry {url!r} must be an https:// URL")
+    return urls
+
+
 def loadWebSettings(environ: dict[str, str]) -> WebSettings:
     allowInsecure = environ.get("ALLOW_INSECURE_HTTP", "").strip() == "1"
     publicBaseUrl = parsePublicBaseUrl(readRequired("PUBLIC_BASE_URL", environ), allowInsecure)
@@ -202,6 +223,7 @@ def loadWebSettings(environ: dict[str, str]) -> WebSettings:
         trustedProxies=trustedProxies,
         clientIpHeader=clientIpHeader,
         ipRetentionDays=readInt("IP_RETENTION_DAYS", environ, default=180, minimum=1, maximum=3650),
+        vpnListUrls=readVpnListUrls(environ),
         listenHost=environ.get("WEB_LISTEN_HOST", "").strip() or "0.0.0.0",
         listenPort=readInt("WEB_LISTEN_PORT", environ, default=8080, minimum=1, maximum=65535),
     )
