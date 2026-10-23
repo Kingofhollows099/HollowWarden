@@ -240,3 +240,32 @@ class TestWrongAccountPage:
         assert response.status == 403
         for hint in ("private window", "Not you?", "Click Verify in Discord again", "works only once"):
             assert hint in text
+
+
+class TestRejoiningServer:
+    """Kicking the bot deletes its slash commands; rejoining must restore them."""
+
+    def homeGuild(self):
+        return SimpleNamespace(id=111111111111111111, name="Home", leave=AsyncMock())
+
+    async def test_rejoinRegistersCommandsAndRechecksSetup(self, bot):
+        bot.tree.sync = AsyncMock()
+        bot.checkSetup = MagicMock()
+        await bot.on_guild_join(self.homeGuild())
+        assert bot.tree.sync.await_args.kwargs["guild"].id == 111111111111111111
+        bot.checkSetup.assert_called_once()
+
+    async def test_rejoinWithoutCommandsScopeLogsInsteadOfCrashing(self, bot, caplog):
+        bot.tree.sync = AsyncMock(side_effect=forbidden())
+        bot.checkSetup = MagicMock()
+        with caplog.at_level(logging.ERROR):
+            await bot.on_guild_join(self.homeGuild())
+        assert any("applications.commands" in message for message in errorMessages(caplog))
+        bot.checkSetup.assert_called_once()
+
+    async def test_otherServerIsLeftWithoutRegistering(self, bot):
+        bot.tree.sync = AsyncMock()
+        otherGuild = SimpleNamespace(id=999999999999999999, name="Other", leave=AsyncMock())
+        await bot.on_guild_join(otherGuild)
+        otherGuild.leave.assert_awaited_once()
+        bot.tree.sync.assert_not_awaited()

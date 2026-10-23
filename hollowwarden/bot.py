@@ -221,15 +221,22 @@ class HollowWardenBot(discord.Client):
         for command in (verificationPanelCommand, verifyMemberCommand, verifyMemberMenu, testConfigCommand):
             self.tree.add_command(command, guild=homeGuild)
         try:
-            await self.tree.sync(guild=homeGuild)
+            await self.syncCommands()
         except discord.Forbidden:
             # Raised as one readable error rather than left as a traceback,
             # so each pass of Docker's restart loop shows the actual cause.
-            raise StartupError(
-                f"Discord denied access to GUILD_ID {self.settings.guildId}: the bot isn't in that server, "
-                "or was invited without the applications.commands scope. Re-invite it using "
-                "OAuth2 → URL Generator with the bot and applications.commands scopes."
-            ) from None
+            raise StartupError(self.describeSyncDenied()) from None
+
+    async def syncCommands(self) -> None:
+        await self.tree.sync(guild=discord.Object(id=self.settings.guildId))
+        log.info("slash commands registered in GUILD_ID %s", self.settings.guildId)
+
+    def describeSyncDenied(self) -> str:
+        return (
+            f"Discord denied access to GUILD_ID {self.settings.guildId}: the bot isn't in that server, "
+            "or was invited without the applications.commands scope. Re-invite it using "
+            "OAuth2 → URL Generator with the bot and applications.commands scopes."
+        )
 
     async def on_ready(self) -> None:
         log.info("logged in as %s (%s)", self.user, self.user.id if self.user else "?")
@@ -243,6 +250,20 @@ class HollowWardenBot(discord.Client):
         if guild.id != self.settings.guildId:
             log.warning("added to unexpected server %s (%s); leaving", guild.name, guild.id)
             await guild.leave()
+            return
+        # Removing the bot from a server deletes its slash commands there, and
+        # re-adding it doesn't bring them back. They're normally registered
+        # only at startup, so register them again now instead of requiring a
+        # restart. The bot also gets a brand-new role on rejoin, which loses
+        # its old position and channel permissions, so re-check the setup too.
+        log.info("re-added to GUILD_ID %s; registering commands again", guild.id)
+        try:
+            await self.syncCommands()
+        except discord.Forbidden:
+            # Unlike at startup, don't stop a running bot over this: its
+            # buttons and the web flow still work without slash commands.
+            log.error("%s", self.describeSyncDenied())
+        self.checkSetup()
 
     def checkSetup(self) -> None:
         """Log clear warnings for common setup mistakes at startup, rather
