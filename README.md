@@ -144,13 +144,41 @@ matches your Cloudflare DNS record:
   sets this header to the connecting IP. The tradeoff is that your home IP is
   visible in DNS.
 - **Proxied (orange cloud)**, the recommended option because it hides your home IP and absorbs
-  attacks: NPM now sees Cloudflare's IPs, not visitors'. Either
-  - use `CLIENT_IP_HEADER=CF-Connecting-IP` **and** configure your router or
-    firewall so ports 80/443 accept connections only from
-    [Cloudflare's IP ranges](https://www.cloudflare.com/ips/). Without that
-    restriction, someone could connect to your home IP directly and send a
-    fake `CF-Connecting-IP` to dodge alt detection; or
-  - configure NPM to restore the real IP from Cloudflare and keep `X-Real-IP`.
+  attacks: NPM now sees Cloudflare's IPs, not visitors'. Fix it in NPM (recommended):
+  edit the proxy host, open the **Advanced** tab, add this line, and save:
+  ```nginx
+  real_ip_header CF-Connecting-IP;
+  ```
+  Keep `CLIENT_IP_HEADER=X-Real-IP`. NPM already trusts Cloudflare's IP ranges
+  (it downloads them at startup), but by default it reads the visitor IP from
+  `X-Real-IP`, which Cloudflare doesn't set. Worse, that default lets anyone
+  pick their own IP by sending an `X-Real-IP` header through Cloudflare. With
+  this line, NPM uses `CF-Connecting-IP`, which Cloudflare always overwrites, and
+  accepts it only from Cloudflare's servers.
+
+  The alternative is `CLIENT_IP_HEADER=CF-Connecting-IP` **plus** a firewall
+  that only lets [Cloudflare's IP ranges](https://www.cloudflare.com/ips/)
+  reach ports 80/443. Without that firewall, someone could connect to your home IP
+  directly and send a fake `CF-Connecting-IP`. If NPM's ports are published by
+  Docker, note that Docker's rules bypass `ufw`, so the restriction has to go in
+  the `DOCKER-USER` iptables chain or on your router.
+
+**Quick check:** on a phone with **Wi-Fi off**, open
+`https://verify.example.com/selftest` (your domain). It shows one word about
+your phone's connection, never the address itself:
+
+- `ok`: the bot sees visitors' real public IPs. This is what you want.
+- `untrusted-proxy`: NPM's address isn't in `TRUSTED_PROXIES`, so the header is
+  ignored. Set `TRUSTED_PROXIES` to the output of
+  `docker network inspect <NPM_NETWORK> --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`.
+- `private`: NPM sent a private address in the header. From mobile data,
+  that means the header isn't carrying the visitor's IP. Check `CLIENT_IP_HEADER`.
+- `cloudflare-ip`: the bot sees Cloudflare's servers instead of visitors. Add
+  `real_ip_header CF-Connecting-IP;` to the proxy host as described above.
+
+Run it from mobile data specifically. From inside your home network, `private`
+is normal, because the request never leaves it (router NAT loopback or local
+DNS). `/test-config` runs the same check from the server and says which case it found.
 
 **Test it before trusting it.** Verify one test account on home Wi-Fi and a
 second on mobile data. They should not be flagged. Then verify a third

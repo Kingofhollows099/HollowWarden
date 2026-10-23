@@ -180,13 +180,32 @@ class TestSelfTestInterpretation:
         findings = interpretSelfTest(webSettings, 200, "ok", behindCloudflare=False)
         assert [finding.level for finding in findings] == [OK, OK]
 
-    def test_privateIpIsAWarning(self, webSettings):
+    def test_privateIpFromTrustedProxyIsAWarning(self, webSettings):
         findings = interpretSelfTest(webSettings, 200, "private", behindCloudflare=False)
         assert [finding.level for finding in findings] == [OK, WARNING]
+        assert "Wi-Fi off" in findings[1].text and f"{webSettings.publicBaseUrl}/selftest" in findings[1].text
 
-    def test_cloudflareWithRealIpHeaderIsAWarning(self, webSettings):
+    def test_untrustedProxyIsAProblem(self, webSettings):
+        findings = interpretSelfTest(webSettings, 200, "untrusted-proxy", behindCloudflare=False)
+        assert [finding.level for finding in findings] == [OK, ERROR]
+
+    def test_cloudflareAddressSeenIsAProblem(self, webSettings):
+        findings = interpretSelfTest(webSettings, 200, "cloudflare-ip", behindCloudflare=True)
+        assert [finding.level for finding in findings] == [OK, ERROR]
+        assert "real_ip_header CF-Connecting-IP;" in findings[1].text
+
+    def test_cloudflareRestoredByNpmPasses(self, webSettings):
+        # Behind Cloudflare with X-Real-IP, once NPM restores the real IP:
+        # no warning, since the outcome was checked rather than guessed.
         findings = interpretSelfTest(webSettings, 200, "ok", behindCloudflare=True)
-        assert findings[1].level == WARNING and "flagged as alts" in findings[1].text
+        assert [finding.level for finding in findings] == [OK, OK]
+        assert "restored from Cloudflare correctly" in findings[1].text
+
+    def test_cloudflareHeaderUsedDirectlyRemindsAboutFirewall(self, tmp_path):
+        webSettings = loadSettings(webEnviron(tmp_path, CLIENT_IP_HEADER="CF-Connecting-IP")).web
+        findings = interpretSelfTest(webSettings, 200, "ok", behindCloudflare=True)
+        assert [finding.level for finding in findings] == [OK, OK]
+        assert "firewall" in findings[1].text
 
 
 class TestWebsiteCheckEndToEnd:
@@ -215,12 +234,15 @@ class TestWebsiteCheckEndToEnd:
         assert [finding.level for finding in findings] == [ERROR]
         assert "didn't send the X-Real-IP header" in findings[0].text
 
-    async def test_wrongTrustedProxiesShowsPrivateIp(self, aiohttp_server, unused_tcp_port_factory, tmp_path, storage):
+    async def test_wrongTrustedProxiesIsAProblem(self, aiohttp_server, unused_tcp_port_factory, tmp_path, storage):
+        # The check connects from 127.0.0.1, standing in for NPM, which isn't
+        # in TRUSTED_PROXIES here: the header gets ignored.
         findings = await self.runAgainstLocalSite(
             aiohttp_server, unused_tcp_port_factory, tmp_path, storage, TRUSTED_PROXIES="10.0.0.0/8"
         )
-        assert [finding.level for finding in findings] == [OK, WARNING]
-        assert "private address" in findings[1].text
+        assert [finding.level for finding in findings] == [OK, ERROR]
+        assert "isn't in TRUSTED_PROXIES" in findings[1].text
+        assert "docker network inspect" in findings[1].text
 
     async def test_unreachableSiteIsAWarning(self, unused_tcp_port_factory, tmp_path):
         port = unused_tcp_port_factory()
@@ -241,6 +263,27 @@ class TestSelfTestPage:
         privateResponse = await client.get("/selftest", headers={"X-Real-IP": "10.1.2.3"})
         assert await publicResponse.text() == "ok"
         assert await privateResponse.text() == "private"
+
+    async def test_cloudflareServerAddressIsReported(self, aiohttp_client, settings, storage):
+        site = VerificationSite(settings.web, storage, Verifier(settings, storage, FakeGateway()), FakeOAuth(), lambda: True)
+        client = await aiohttp_client(site.createApp())
+        # NPM's default behind Cloudflare: X-Real-IP is the Cloudflare server.
+        notRestored = await client.get(
+            "/selftest", headers={"X-Real-IP": "162.158.1.1", "CF-Connecting-IP": "1.1.1.1"}
+        )
+        # With real_ip_header CF-Connecting-IP in NPM, the two match.
+        restored = await client.get("/selftest", headers={"X-Real-IP": "1.1.1.1", "CF-Connecting-IP": "1.1.1.1"})
+        assert await notRestored.text() == "cloudflare-ip"
+        assert await restored.text() == "ok"
+
+    async def test_reportsWhenProxyIsntTrusted(self, aiohttp_client, tmp_path, storage):
+        # The test client connects from 127.0.0.1, which isn't trusted here,
+        # so its X-Real-IP is ignored and its own private address is used.
+        settings = loadSettings(webEnviron(tmp_path, TRUSTED_PROXIES="10.0.0.0/8"))
+        site = VerificationSite(settings.web, storage, Verifier(settings, storage, FakeGateway()), FakeOAuth(), lambda: True)
+        client = await aiohttp_client(site.createApp())
+        response = await client.get("/selftest", headers={"X-Real-IP": "1.1.1.1"})
+        assert await response.text() == "untrusted-proxy"
 
 
 class TestOtherChecks:

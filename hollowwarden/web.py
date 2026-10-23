@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable
 from aiohttp import web
 
 from .config import WebSettings
-from .netutil import hashIp, resolveClientIp
+from .netutil import hashIp, isTrustedProxy, resolveClientIp
 from .oauth import DiscordOAuth, OAuthError
 from .ratelimit import RateLimiter
 from .storage import Storage, sha256Hex
@@ -48,6 +48,8 @@ NONCE_COOKIE_NAME = "__Host-hw_nonce"
 OAUTH_STATE_LIFETIME_SECONDS = 600
 IP_HASH_KEY = "hollowwarden.ipHash"
 IP_IS_PUBLIC_KEY = "hollowwarden.ipIsPublic"
+PEER_IS_TRUSTED_KEY = "hollowwarden.peerIsTrusted"
+CLOUDFLARE_IP_MISMATCH_KEY = "hollowwarden.cloudflareIpMismatch"
 
 # The Clipboard Cleaner theme: dark navy, flat, a 4px radius, one raspberry
 # accent kept for status. Custom property names match the design system's
@@ -201,17 +203,49 @@ class VerificationSite:
             return renderPage(429, "Slow down", "Too many attempts. Please wait a few minutes and try again.")
         request[IP_HASH_KEY] = ipHash
         request[IP_IS_PUBLIC_KEY] = ipaddress.ip_address(clientIp).is_global
+        request[PEER_IS_TRUSTED_KEY] = isTrustedProxy(request.remote, self.settings.trustedProxies)
+        request[CLOUDFLARE_IP_MISMATCH_KEY] = self.differsFromCloudflare(request, clientIp)
         return await handler(request)
+
+    @staticmethod
+    def differsFromCloudflare(request: web.Request, clientIp: str) -> bool:
+        """True if the request came through Cloudflare but the IP we resolved
+        isn't the visitor IP Cloudflare reported, meaning we got a Cloudflare
+        server's address. Only /selftest uses this, and only as a yes or no."""
+        cloudflareIp = request.headers.get("CF-Connecting-IP", "").strip()
+        if not cloudflareIp:
+            return False
+        try:
+            return ipaddress.ip_address(cloudflareIp) != ipaddress.ip_address(clientIp)
+        except ValueError:
+            return False
 
     async def handleHealth(self, request: web.Request) -> web.Response:
         return web.Response(text="ok")
 
     async def handleSelfTest(self, request: web.Request) -> web.Response:
-        """Used by /test-config, which requests this page through the public
-        URL. Getting here at all means the proxy chain works and a client IP
-        could be determined. The reply only says whether that IP looks like a
-        real internet address, never what it is, so it's safe to leave public."""
-        return web.Response(text="ok" if request[IP_IS_PUBLIC_KEY] else "private")
+        """Used by /test-config, and by people testing from their phone.
+        Getting here at all means the proxy chain works and a client IP could
+        be determined. The reply never includes any address, only one word:
+
+        - "ok": the visitor's IP is a public internet address, as it should be.
+        - "untrusted-proxy": the connection came from a private address not
+          in TRUSTED_PROXIES. That's almost certainly NPM itself, so the IP
+          header is being ignored and every visitor looks the same.
+        - "private": a trusted proxy reported a private address. That happens
+          when the request started inside your own network (NAT loopback or
+          local DNS) and only affects tests run from there.
+        - "cloudflare-ip": the request came through Cloudflare, but the IP we
+          got is a Cloudflare server's, not the visitor's. Every member would
+          look like they share a handful of addresses.
+        """
+        if request[IP_IS_PUBLIC_KEY]:
+            if request[CLOUDFLARE_IP_MISMATCH_KEY]:
+                return web.Response(text="cloudflare-ip")
+            return web.Response(text="ok")
+        if not request[PEER_IS_TRUSTED_KEY]:
+            return web.Response(text="untrusted-proxy")
+        return web.Response(text="private")
 
     async def handleVerify(self, request: web.Request) -> web.Response:
         token = request.query.get("t", "")

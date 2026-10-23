@@ -155,7 +155,7 @@ def interpretSelfTest(webSettings: WebSettings, status: int, body: str, behindCl
         ]
     if status == 429:
         return [Finding(WARNING, "The website check was rate-limited. Wait a few minutes and run it again.")]
-    if status != 200 or body not in ("ok", "private"):
+    if status != 200 or body not in ("ok", "private", "untrusted-proxy", "cloudflare-ip"):
         return [
             Finding(
                 ERROR,
@@ -165,25 +165,37 @@ def interpretSelfTest(webSettings: WebSettings, status: int, body: str, behindCl
         ]
 
     findings = [Finding(OK, f"Website is reachable at {webSettings.publicBaseUrl} over HTTPS.")]
-    if body == "private":
+    if body == "untrusted-proxy":
+        findings.append(
+            Finding(
+                ERROR,
+                "Nginx Proxy Manager's address isn't in TRUSTED_PROXIES, so the bot ignores "
+                f"{webSettings.clientIpHeader} and sees NPM's own address for every visitor. Every member "
+                "would be flagged as an alt of every other. Set TRUSTED_PROXIES to the subnet from "
+                "`docker network inspect <NPM_NETWORK> --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'`.",
+            )
+        )
+    elif body == "private":
         findings.append(
             Finding(
                 WARNING,
-                "The bot saw a private address as the visitor's IP. Either TRUSTED_PROXIES doesn't match NPM's "
-                "Docker network, or your router loops requests to your own domain back internally. Test from "
-                "mobile data to be sure (see README → Getting the real IP).",
+                "This test request reached the site from inside your own network (router NAT loopback, or "
+                "local DNS such as Pi-hole, AdGuard or /etc/hosts), so the proxy reported a private address. "
+                "Real visitors aren't affected by that. To confirm, open "
+                f"{webSettings.publicBaseUrl}/selftest on a phone with Wi-Fi off: it should say ok.",
             )
         )
-    elif behindCloudflare and not usesCloudflareHeader:
+    elif body == "cloudflare-ip":
         findings.append(
             Finding(
-                WARNING,
-                "The site is behind Cloudflare's proxy, but CLIENT_IP_HEADER isn't CF-Connecting-IP. Unless "
-                "NPM restores real visitor IPs from Cloudflare, every member will look like they share an IP "
-                "and be flagged as alts of each other.",
+                ERROR,
+                "The site is behind Cloudflare, but the bot sees Cloudflare's servers instead of visitors, so "
+                "every member would be flagged as an alt of every other. In Nginx Proxy Manager, edit this "
+                "proxy host, open the Advanced tab, add `real_ip_header CF-Connecting-IP;` and save. Keep "
+                "CLIENT_IP_HEADER=X-Real-IP (see README → Getting the real IP).",
             )
         )
-    elif behindCloudflare:
+    elif behindCloudflare and usesCloudflareHeader:
         findings.append(
             Finding(
                 OK,
@@ -191,6 +203,8 @@ def interpretSelfTest(webSettings: WebSettings, status: int, body: str, behindCl
                 "to ports 80/443, or the header could be faked. This check can't verify that.",
             )
         )
+    elif behindCloudflare:
+        findings.append(Finding(OK, "Real visitor IPs are being restored from Cloudflare correctly."))
     else:
         findings.append(Finding(OK, "Visitor IPs are being read correctly."))
     return findings
