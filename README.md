@@ -167,8 +167,26 @@ docker compose logs -f   # look for "logged in as" and any setup errors
 
 At startup the bot checks its own setup and logs plain-English errors for
 common mistakes (role order, a dangerous verified role, a missing channel).
-Once it's running, type `/verification-panel` in `#verify` to post the
-Verify button.
+
+Once it's running, a bot admin can type **`/test-config`** anywhere in the
+server. It privately shows a report of problems, warnings and passed checks:
+
+- **Roles:** the Verified role is safe and assignable, the admin roles exist,
+  and the bot doesn't have Administrator.
+- **Channels:** the bot can post in the mod channel, the mod channel is
+  hidden from `@everyone` and from verified members, and which channels
+  unverified members can see.
+- **Discord app settings:** Public Bot is off and, in web mode, the OAuth
+  redirect is registered and the client secret is valid.
+- **Database:** it can be written to.
+- **Website (web mode):** the bot loads its own public page the way a
+  member's browser would, checking DNS, HTTPS and Nginx Proxy Manager, and
+  that visitor IPs are read correctly, including common Cloudflare mistakes.
+  If your router doesn't support NAT loopback, this check can fail even
+  though the site works. The report says so.
+
+Fix anything listed under **Problems**, then type `/verification-panel` in
+`#verify` to post the Verify button.
 
 ## Day to day
 

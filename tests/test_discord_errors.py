@@ -201,24 +201,18 @@ class TestWebFlowWhenModChannelFails:
 
 
 class TestCheckSetup:
-    def fakeGuild(self, modChannelPermissions):
-        modChannel = MagicMock()
-        modChannel.permissions_for = MagicMock(return_value=modChannelPermissions)
-        return SimpleNamespace(
-            me=SimpleNamespace(guild_permissions=discord.Permissions(manage_roles=True)),
-            get_role=lambda roleId: object(),
-            get_channel=lambda channelId: modChannel if channelId == MOD_CHANNEL_ID else None,
-        )
+    def runCheck(self, bot, caplog, botModPermissions):
+        from .test_test_config import makeFakeGuild
 
-    def runCheck(self, bot, caplog, guild):
+        guild, verifiedRole = makeFakeGuild(botModPermissions=botModPermissions)
         bot.get_guild = lambda guildId: guild
-        bot.getVerifiedRole = lambda: None
+        bot.getVerifiedRole = lambda: verifiedRole
         with caplog.at_level(logging.ERROR):
             bot.checkSetup()
         return errorMessages(caplog)
 
     def test_missingChannelPermissionsAreNamed(self, bot, caplog):
-        messages = self.runCheck(bot, caplog, self.fakeGuild(discord.Permissions(view_channel=True)))
+        messages = self.runCheck(bot, caplog, discord.Permissions(view_channel=True))
         assert any(
             "Send Messages, Embed Links" in message and str(MOD_CHANNEL_ID) in message and "View Channel" not in message
             for message in messages
@@ -226,7 +220,7 @@ class TestCheckSetup:
 
     def test_noErrorWhenPermissionsAreRight(self, bot, caplog):
         permissions = discord.Permissions(view_channel=True, send_messages=True, embed_links=True)
-        assert self.runCheck(bot, caplog, self.fakeGuild(permissions)) == []
+        assert self.runCheck(bot, caplog, permissions) == []
 
 
 class TestWrongAccountPage:

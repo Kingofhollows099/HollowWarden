@@ -44,6 +44,7 @@ async def run(settings: Settings) -> None:
         if settings.web is not None:
             oauth = DiscordOAuth(settings.web.clientId, settings.web.clientSecret, settings.web.redirectUri)
             await oauth.start()
+            bot.oauth = oauth
             site = VerificationSite(settings.web, storage, bot.verifier, oauth, bot.is_ready)
             # access_log=None: access logs would record visitors' IPs and the
             # one-time tokens and OAuth codes in the URLs.

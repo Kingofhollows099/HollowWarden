@@ -24,6 +24,7 @@ import base64
 import hashlib
 import hmac
 import html
+import ipaddress
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -46,6 +47,7 @@ OAUTH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,128}$")
 NONCE_COOKIE_NAME = "__Host-hw_nonce"
 OAUTH_STATE_LIFETIME_SECONDS = 600
 IP_HASH_KEY = "hollowwarden.ipHash"
+IP_IS_PUBLIC_KEY = "hollowwarden.ipIsPublic"
 
 # The Clipboard Cleaner theme: dark navy, flat, a 4px radius, one raspberry
 # accent kept for status. Custom property names match the design system's
@@ -153,6 +155,7 @@ class VerificationSite:
         app.router.add_get("/verify", self.handleVerify)
         app.router.add_get("/callback", self.handleCallback)
         app.router.add_get("/healthz", self.handleHealth)
+        app.router.add_get("/selftest", self.handleSelfTest)
         app.on_response_prepare.append(self.addSecurityHeaders)
         return app
 
@@ -197,10 +200,18 @@ class VerificationSite:
         if not self.rateLimiter.allow(ipHash):
             return renderPage(429, "Slow down", "Too many attempts. Please wait a few minutes and try again.")
         request[IP_HASH_KEY] = ipHash
+        request[IP_IS_PUBLIC_KEY] = ipaddress.ip_address(clientIp).is_global
         return await handler(request)
 
     async def handleHealth(self, request: web.Request) -> web.Response:
         return web.Response(text="ok")
+
+    async def handleSelfTest(self, request: web.Request) -> web.Response:
+        """Used by /test-config, which requests this page through the public
+        URL. Getting here at all means the proxy chain works and a client IP
+        could be determined. The reply only says whether that IP looks like a
+        real internet address, never what it is, so it's safe to leave public."""
+        return web.Response(text="ok" if request[IP_IS_PUBLIC_KEY] else "private")
 
     async def handleVerify(self, request: web.Request) -> web.Response:
         token = request.query.get("t", "")
