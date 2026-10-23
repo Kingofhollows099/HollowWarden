@@ -76,10 +76,25 @@ def readSecret(name: str, environ: dict[str, str]) -> str:
     return value
 
 
+def missingSettingHint(name: str, environ: dict[str, str]) -> str:
+    """Point at .env.example when a setting is absent rather than blank.
+
+    A blank value means the line is in .env but wasn't filled in. A missing
+    line usually means the setting was added by an update after .env was
+    created, which the person can't guess from "must be set" alone.
+    """
+    if name in environ:
+        return ""
+    return (
+        f". {name} isn't in your .env at all; if you set up HollowWarden before this setting existed, "
+        "copy it from .env.example"
+    )
+
+
 def readRequired(name: str, environ: dict[str, str]) -> str:
     value = environ.get(name, "").strip()
     if not value:
-        raise ConfigError(f"{name} must be set")
+        raise ConfigError(f"{name} must be set{missingSettingHint(name, environ)}")
     return value
 
 
@@ -93,7 +108,10 @@ def readSnowflake(name: str, environ: dict[str, str]) -> int:
 def readAdminRoleIds(environ: dict[str, str], guildId: int, verifiedRoleId: int) -> frozenset[int]:
     entries = [entry.strip() for entry in environ.get("ADMIN_ROLE_IDS", "").split(",") if entry.strip()]
     if not entries:
-        raise ConfigError("ADMIN_ROLE_IDS must list at least one role ID (comma-separated)")
+        raise ConfigError(
+            "ADMIN_ROLE_IDS must list at least one role ID (comma-separated)"
+            + missingSettingHint("ADMIN_ROLE_IDS", environ)
+        )
     roleIds = set()
     for entry in entries:
         if not SNOWFLAKE_PATTERN.match(entry):
