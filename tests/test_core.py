@@ -103,6 +103,17 @@ class TestConfig:
         with pytest.raises(ConfigError, match="ADMIN_ROLE_IDS"):
             loadSettings(baseEnviron(tmp_path, ADMIN_ROLE_IDS=adminRoleIds))
 
+    def test_settingMissingFromEnvPointsToExample(self, tmp_path):
+        environ = baseEnviron(tmp_path)
+        del environ["ADMIN_ROLE_IDS"]
+        with pytest.raises(ConfigError, match=r"isn't in your \.env at all.*\.env\.example"):
+            loadSettings(environ)
+
+    def test_blankSettingGetsPlainMessage(self, tmp_path):
+        with pytest.raises(ConfigError) as raised:
+            loadSettings(baseEnviron(tmp_path, ADMIN_ROLE_IDS=""))
+        assert ".env.example" not in str(raised.value)
+
     def test_invalidSnowflake(self, tmp_path):
         with pytest.raises(ConfigError, match="GUILD_ID"):
             loadSettings(baseEnviron(tmp_path, GUILD_ID="my-server"))

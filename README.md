@@ -205,7 +205,12 @@ Fix anything listed under **Problems**, then type `/verification-panel` in
   (non-admins get "Only bot admins can do that"). To hide them, go to **Server
   Settings → Integrations → HollowWarden**. That setting only controls
   visibility. Access is always decided by the bot.
-- **Updating:** `git pull && docker compose up -d --build`.
+- **Updating:** `git pull && docker compose up -d --build`. Updates can add
+  new settings to `.env.example`. This lists any your `.env` doesn't have yet:
+  ```bash
+  grep -oE '^[A-Z_]+=' .env.example | grep -vxFf <(grep -oE '^[A-Z_]+=' .env)
+  ```
+  The bot also refuses to start if a required one is missing, and names it.
 - **Customising `docker-compose.yml`:** don't edit it directly. A pull could
   conflict with your changes or overwrite them. Copy
   `docker-compose.override.example.yml` to `docker-compose.override.yml` and
