@@ -79,10 +79,13 @@ class Verifier:
     async def completeCaptcha(self, userId: int) -> Outcome:
         return await self._complete(userId, method="captcha", ipHash=None)
 
-    async def completeWeb(self, userId: int, ipHash: str) -> Outcome:
-        return await self._complete(userId, method="web login", ipHash=ipHash)
+    async def completeWeb(self, userId: int, ipHash: str, isVpn: bool | None = None) -> Outcome:
+        """isVpn is None when VPN detection is off or its list isn't loaded."""
+        return await self._complete(userId, method="web login", ipHash=ipHash, isVpn=isVpn)
 
-    async def _complete(self, userId: int, method: str, ipHash: str | None, now: float | None = None) -> Outcome:
+    async def _complete(
+        self, userId: int, method: str, ipHash: str | None, isVpn: bool | None = None, now: float | None = None
+    ) -> Outcome:
         currentTime = time.time() if now is None else now
 
         memberState = await self.gateway.getMemberState(userId)
@@ -101,6 +104,11 @@ class Verifier:
             reasons.append(
                 f"Account is only {describeAge(accountAge)} old (minimum is {self.settings.minAccountAgeDays} days)."
             )
+
+        if isVpn:
+            # A VPN hides the network someone really connects from, which is
+            # what alt detection relies on, so a moderator should take a look.
+            reasons.append("Connected through a known VPN network, so the alt check can't see their real network.")
 
         if ipHash is not None:
             matchedUserIds = await self.storage.recordIpAndFindMatches(userId, ipHash, now=currentTime)

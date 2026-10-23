@@ -9,6 +9,7 @@ state.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import aiohttp
@@ -16,6 +17,7 @@ import aiohttp
 from .config import Settings, WebSettings
 from .oauth import DiscordOAuth, OAuthError
 from .storage import Storage
+from .vpnlist import VpnChecker
 
 OK = "ok"
 WARNING = "warning"
@@ -208,6 +210,24 @@ def interpretSelfTest(webSettings: WebSettings, status: int, body: str, behindCl
     else:
         findings.append(Finding(OK, "Visitor IPs are being read correctly."))
     return findings
+
+
+def checkVpnList(vpnChecker: VpnChecker | None, now: float | None = None) -> Finding:
+    if vpnChecker is None:
+        return Finding(OK, "VPN detection is turned off (FLAG_VPN=false).")
+    if vpnChecker.networkList is None:
+        reason = f" Last error: {vpnChecker.lastError}." if vpnChecker.lastError else ""
+        return Finding(
+            WARNING,
+            "VPN detection is on, but the VPN list hasn't downloaded yet, so VPN users aren't being flagged."
+            f"{reason} Check the server can reach VPN_LIST_URLS.",
+        )
+    ageDays = int(((time.time() if now is None else now) - (vpnChecker.updatedAt or 0)) // 86400)
+    summary = f"{vpnChecker.networkList.rangeCount:,} ranges, updated {ageDays} day{'s' if ageDays != 1 else ''} ago"
+    if vpnChecker.isStale(now=now):
+        reason = f" Last error: {vpnChecker.lastError}." if vpnChecker.lastError else ""
+        return Finding(WARNING, f"The VPN list hasn't updated in a while ({summary}).{reason}")
+    return Finding(OK, f"VPN list loaded ({summary}).")
 
 
 def formatReport(findings: list[Finding], summary: str) -> tuple[str, str]:
