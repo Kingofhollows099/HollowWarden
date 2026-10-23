@@ -1,0 +1,34 @@
+# Your local changes to docker-compose.yml go in a file named
+# docker-compose.override.yml (copy this one to start). Git ignores that file,
+# so `git pull` never changes or deletes it, and Docker Compose merges it on
+# top of docker-compose.yml automatically on every `docker compose up`.
+#
+# Only write what you're changing. How each kind of setting merges:
+#   - single values (mem_limit, cpus, restart, ...): yours replaces the original
+#   - lists (ports, tmpfs, dns, ...): yours are ADDED to the original;
+#     write `key: !override` to replace the list instead
+#   - environment / labels / volumes: merged entry by entry
+#   - `key: !reset null` removes a setting entirely
+#
+# Check the merged result before restarting:  docker compose config
+#
+# Be careful with the security settings (read_only, cap_drop, security_opt,
+# user, the absence of ports). Each one blocks a way an attacker could abuse
+# the container. Loosening them here quietly undoes that, and later pulls won't
+# put them back.
+
+services:
+  hollowwarden:
+    # Example: give it more memory.
+    # mem_limit: 512m
+
+    # Example: reach the website directly from this machine, for debugging.
+    # Bind to 127.0.0.1 so only this machine can connect. A bare "8080:8080"
+    # would expose the bot to your whole network, bypassing Nginx Proxy Manager.
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+
+    # Example: keep logs for longer (update PRIVACY.md if you change this).
+    # logging:
+    #   options:
+    #     max-file: "5"

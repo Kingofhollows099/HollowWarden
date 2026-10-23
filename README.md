@@ -206,6 +206,11 @@ Fix anything listed under **Problems**, then type `/verification-panel` in
   Settings → Integrations → HollowWarden**. That setting only controls
   visibility. Access is always decided by the bot.
 - **Updating:** `git pull && docker compose up -d --build`.
+- **Customising `docker-compose.yml`:** don't edit it directly. A pull could
+  conflict with your changes or overwrite them. Copy
+  `docker-compose.override.example.yml` to `docker-compose.override.yml` and
+  put only your changed lines there. Git ignores that file, and Docker Compose
+  merges it in automatically. Run `docker compose config` to see the merged result.
 - **Bot token leaked?** Reset it immediately in the developer portal,
   replace `secrets/discord_bot_token`, and run `docker compose up -d`.
 - **Backups:** the `hollowwarden-data` volume holds the database, including

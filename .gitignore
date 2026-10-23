@@ -13,3 +13,6 @@ secrets/*
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Your local Docker Compose changes (see docker-compose.override.example.yml)
+docker-compose.override.yml
