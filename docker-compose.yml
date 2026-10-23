@@ -19,6 +19,11 @@ services:
       - ip_hash_key
     volumes:
       - hollowwarden-data:/data
+    labels:
+      # This image is built locally from your checkout and exists on no
+      # registry, so auto-updaters can't update it correctly. Update with
+      # `git pull && docker compose up -d --build` instead.
+      - com.centurylinklabs.watchtower.enable=false
 
     # Hardening. Each line removes something an attacker would want if they
     # ever got code running inside the container.

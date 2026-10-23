@@ -66,6 +66,16 @@ that account controls the bot.
    Verified, except in a `#verify` channel that everyone can see but not
    type in.
 4. Create a private mod channel (for example `#verification-log`) that the bot can post in.
+
+   **Give the bot's role explicit allows in both channels.** Denying
+   `@everyone` takes these permissions away from the bot as well, unless its
+   own role is allowed them in that channel's permission settings:
+   - `#verify`: **View Channel, Send Messages, Embed Links, Attach Files**
+   - the mod channel: **View Channel, Send Messages, Embed Links**
+
+   If the mod channel is wrong, the bot logs exactly which permissions are
+   missing when it starts. If `#verify` is wrong, `/verification-panel`
+   tells you privately when you run it.
 5. Decide which roles are **bot admins** (for example `Owner` and
    `Moderator`). Only members with one of these roles, plus the server owner,
    can use the bot's commands and its Approve/Deny buttons. Discord
@@ -157,8 +167,26 @@ docker compose logs -f   # look for "logged in as" and any setup errors
 
 At startup the bot checks its own setup and logs plain-English errors for
 common mistakes (role order, a dangerous verified role, a missing channel).
-Once it's running, type `/verification-panel` in `#verify` to post the
-Verify button.
+
+Once it's running, a bot admin can type **`/test-config`** anywhere in the
+server. It privately shows a report of problems, warnings and passed checks:
+
+- **Roles:** the Verified role is safe and assignable, the admin roles exist,
+  and the bot doesn't have Administrator.
+- **Channels:** the bot can post in the mod channel, the mod channel is
+  hidden from `@everyone` and from verified members, and which channels
+  unverified members can see.
+- **Discord app settings:** Public Bot is off and, in web mode, the OAuth
+  redirect is registered and the client secret is valid.
+- **Database:** it can be written to.
+- **Website (web mode):** the bot loads its own public page the way a
+  member's browser would, checking DNS, HTTPS and Nginx Proxy Manager, and
+  that visitor IPs are read correctly, including common Cloudflare mistakes.
+  If your router doesn't support NAT loopback, this check can fail even
+  though the site works. The report says so.
+
+Fix anything listed under **Problems**, then type `/verification-panel` in
+`#verify` to post the Verify button.
 
 ## Day to day
 
@@ -178,6 +206,11 @@ Verify button.
   Settings → Integrations → HollowWarden**. That setting only controls
   visibility. Access is always decided by the bot.
 - **Updating:** `git pull && docker compose up -d --build`.
+- **Customising `docker-compose.yml`:** don't edit it directly. A pull could
+  conflict with your changes or overwrite them. Copy
+  `docker-compose.override.example.yml` to `docker-compose.override.yml` and
+  put only your changed lines there. Git ignores that file, and Docker Compose
+  merges it in automatically. Run `docker compose config` to see the merged result.
 - **Bot token leaked?** Reset it immediately in the developer portal,
   replace `secrets/discord_bot_token`, and run `docker compose up -d`.
 - **Backups:** the `hollowwarden-data` volume holds the database, including
