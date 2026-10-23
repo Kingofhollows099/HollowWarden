@@ -66,6 +66,16 @@ that account controls the bot.
    Verified, except in a `#verify` channel that everyone can see but not
    type in.
 4. Create a private mod channel (for example `#verification-log`) that the bot can post in.
+
+   **Give the bot's role explicit allows in both channels.** Denying
+   `@everyone` takes these permissions away from the bot as well, unless its
+   own role is allowed them in that channel's permission settings:
+   - `#verify`: **View Channel, Send Messages, Embed Links, Attach Files**
+   - the mod channel: **View Channel, Send Messages, Embed Links**
+
+   If the mod channel is wrong, the bot logs exactly which permissions are
+   missing when it starts. If `#verify` is wrong, `/verification-panel`
+   tells you privately when you run it.
 5. Decide which roles are **bot admins** (for example `Owner` and
    `Moderator`). Only members with one of these roles, plus the server owner,
    can use the bot's commands and its Approve/Deny buttons. Discord

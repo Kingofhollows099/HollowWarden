@@ -68,11 +68,24 @@ OUTCOME_MESSAGES = {
     Outcome.PENDING_REVIEW: "Pending review. A moderator will take a quick look before you get access.",
     Outcome.ALREADY_VERIFIED: "✓  Already verified.",
     Outcome.NOT_MEMBER: "⚠  You need to be in the server to verify.",
+    Outcome.UNAVAILABLE: "⚠  Verification couldn't be completed right now. Please tell a moderator.",
 }
+
+# What the bot needs in the mod channel, as (permission attribute, name shown
+# in Discord's settings).
+MOD_CHANNEL_PERMISSIONS = (
+    ("view_channel", "View Channel"),
+    ("send_messages", "Send Messages"),
+    ("embed_links", "Embed Links"),
+)
 
 
 class UnsafeRoleError(Exception):
     """The verified role is misconfigured in a way that would be dangerous."""
+
+
+class StartupError(Exception):
+    """Discord refused something the bot needs before it can run at all."""
 
 
 @dataclass
@@ -196,7 +209,16 @@ class HollowWardenBot(discord.Client):
         # Registered only in your server, never globally.
         for command in (verificationPanelCommand, verifyMemberCommand, verifyMemberMenu):
             self.tree.add_command(command, guild=homeGuild)
-        await self.tree.sync(guild=homeGuild)
+        try:
+            await self.tree.sync(guild=homeGuild)
+        except discord.Forbidden:
+            # Raised as one readable error rather than left as a traceback,
+            # so each pass of Docker's restart loop shows the actual cause.
+            raise StartupError(
+                f"Discord denied access to GUILD_ID {self.settings.guildId}: the bot isn't in that server, "
+                "or was invited without the applications.commands scope. Re-invite it using "
+                "OAuth2 → URL Generator with the bot and applications.commands scopes."
+            ) from None
 
     async def on_ready(self) -> None:
         log.info("logged in as %s (%s)", self.user, self.user.id if self.user else "?")
@@ -227,8 +249,22 @@ class HollowWardenBot(discord.Client):
         missingRoleIds = [roleId for roleId in self.settings.adminRoleIds if guild.get_role(roleId) is None]
         if missingRoleIds:
             log.error("ADMIN_ROLE_IDS contains roles that don't exist: %s", ", ".join(map(str, missingRoleIds)))
-        if guild.get_channel(self.settings.modChannelId) is None:
-            log.error("MOD_CHANNEL_ID %s is not a channel the bot can see", self.settings.modChannelId)
+        modChannel = guild.get_channel(self.settings.modChannelId)
+        if modChannel is None:
+            log.error("MOD_CHANNEL_ID %s is not a channel in this server", self.settings.modChannelId)
+            return
+        # Discord tells bots about every channel, including ones they can't
+        # open, so the channel existing proves nothing. Check what the bot
+        # is actually allowed to do there.
+        channelPermissions = modChannel.permissions_for(guild.me)
+        missingPermissions = [label for name, label in MOD_CHANNEL_PERMISSIONS if not getattr(channelPermissions, name)]
+        if missingPermissions:
+            log.error(
+                "HollowWarden is missing %s in MOD_CHANNEL_ID %s; allow them for its role in that channel's "
+                "permissions, or verification messages and reviews can't be posted",
+                ", ".join(missingPermissions),
+                self.settings.modChannelId,
+            )
 
     def getVerifiedRole(self) -> discord.Role:
         guild = self.get_guild(self.settings.guildId)
@@ -287,15 +323,9 @@ class HollowWardenBot(discord.Client):
         await member.add_roles(role, reason=auditReason or "Passed HollowWarden verification")
 
     async def postModLog(self, message: str) -> None:
-        channel = await self.getModChannel()
-        if channel is not None:
-            await channel.send(message)
+        await self.sendToModChannel(content=message)
 
-    async def postReview(self, userId: int, reasons: list[str], needsDecision: bool) -> None:
-        channel = await self.getModChannel()
-        if channel is None:
-            log.error("could not post review for %s: mod channel unavailable", userId)
-            return
+    async def postReview(self, userId: int, reasons: list[str], needsDecision: bool) -> bool:
         heading = "⚠  Held for review" if needsDecision else "⚠  Verified with flags"
         embed = discord.Embed(title=heading, description=f"<@{userId}> (`{userId}`)", colour=ACCENT_COLOUR)
         embed.add_field(name="Why", value="\n".join(f"• {reason}" for reason in reasons)[:1024], inline=False)
@@ -304,7 +334,27 @@ class HollowWardenBot(discord.Client):
             view = discord.ui.View(timeout=None)
             view.add_item(ReviewButton("approve", userId))
             view.add_item(ReviewButton("deny", userId))
-        await channel.send(embed=embed, view=view)
+        return await self.sendToModChannel(embed=embed, view=view)
+
+    async def sendToModChannel(self, **messageFields) -> bool:
+        """Post to the mod channel. Returns False and logs the cause instead
+        of raising, so callers decide whether a failed post matters."""
+        channel = await self.getModChannel()
+        if channel is None:
+            log.error("MOD_CHANNEL_ID %s isn't a text channel HollowWarden can reach", self.settings.modChannelId)
+            return False
+        try:
+            await channel.send(**messageFields)
+        except discord.Forbidden:
+            log.error(
+                "can't post in MOD_CHANNEL_ID %s: give HollowWarden View Channel, Send Messages and Embed Links there",
+                self.settings.modChannelId,
+            )
+            return False
+        except discord.HTTPException as error:
+            log.error("Discord rejected a post to MOD_CHANNEL_ID %s (HTTP %s)", self.settings.modChannelId, error.status)
+            return False
+        return True
 
     async def getModChannel(self) -> discord.abc.Messageable | None:
         channel = self.get_channel(self.settings.modChannelId)
@@ -328,7 +378,18 @@ class HollowWardenBot(discord.Client):
             description="Press **Verify** to get access to the server.",
             colour=ACCENT_COLOUR,
         )
-        await interaction.channel.send(embed=embed, view=VerifyPanelView())
+        try:
+            await interaction.channel.send(embed=embed, view=VerifyPanelView())
+        except discord.Forbidden:
+            # Answer the interaction either way. Otherwise Discord only shows
+            # "The application did not respond", which says nothing useful.
+            log.warning("can't post the verification panel in channel %s: missing permissions", interaction.channel_id)
+            await interaction.response.send_message(
+                "⚠  I can't post here. Give my role View Channel, Send Messages, Embed Links and Attach Files "
+                "in this channel.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message("✓  Verification panel posted.", ephemeral=True)
 
     async def handleVerifyClick(self, interaction: discord.Interaction) -> None:

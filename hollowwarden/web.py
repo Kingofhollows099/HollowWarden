@@ -109,6 +109,11 @@ OUTCOME_PAGES = {
         "This Discord account isn't a member of the server.",
         "⚠  Not a member.",
     ),
+    Outcome.UNAVAILABLE: (
+        "Verification unavailable",
+        "Verification couldn't be completed right now. Please tell a moderator.",
+        "⚠  Verification couldn't be completed right now. Please tell a moderator.",
+    ),
 }
 
 
@@ -264,14 +269,18 @@ class VerificationSite:
                     403,
                     "Wrong account",
                     "You logged in with a different Discord account than the one that clicked Verify. "
-                    "Log in as that account and try again.",
+                    "Your browser may be signed in to a different Discord account than your app. "
+                    "Click Verify in Discord again to get a new link (each link works only once). Then open it "
+                    'in a private window, or click "Not you?" on Discord\'s page, and sign in as the account '
+                    "you're verifying.",
                 )
             )
 
         ipHash = request[IP_HASH_KEY]
         outcome = await self.verifier.completeWeb(expectedUserId, ipHash)
         title, message, statusLine = OUTCOME_PAGES[outcome]
-        return self.finish(renderPage(200, title, message, statusLine))
+        httpStatus = 503 if outcome is Outcome.UNAVAILABLE else 200
+        return self.finish(renderPage(httpStatus, title, message, statusLine))
 
     @staticmethod
     def finish(response: web.Response) -> web.Response:

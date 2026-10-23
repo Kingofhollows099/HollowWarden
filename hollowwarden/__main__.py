@@ -11,7 +11,7 @@ import sys
 
 from aiohttp import web
 
-from .bot import HollowWardenBot
+from .bot import HollowWardenBot, StartupError
 from .config import ConfigError, Settings, loadSettings
 from .oauth import DiscordOAuth
 from .storage import Storage
@@ -93,6 +93,9 @@ def cli() -> None:
     except ConfigError as error:
         log.error("configuration error: %s", error)
         sys.exit(2)
+    except StartupError as error:
+        log.error("%s", error)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

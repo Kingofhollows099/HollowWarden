@@ -32,6 +32,9 @@ class FakeGateway:
         self.auditReasons = []
         self.logs = []
         self.reviews = []
+        # Set False to act like the real gateway when Discord refuses a post
+        # to the mod channel: nothing is posted, nothing is raised.
+        self.modChannelWorks = True
 
     async def getMemberState(self, userId):
         if userId not in self.members:
@@ -44,10 +47,13 @@ class FakeGateway:
         self.members[userId] = True
 
     async def postModLog(self, message):
-        self.logs.append(message)
+        if self.modChannelWorks:
+            self.logs.append(message)
 
     async def postReview(self, userId, reasons, needsDecision):
-        self.reviews.append((userId, reasons, needsDecision))
+        if self.modChannelWorks:
+            self.reviews.append((userId, reasons, needsDecision))
+        return self.modChannelWorks
 
 
 class FakeOAuth(DiscordOAuth):
