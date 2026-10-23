@@ -54,12 +54,12 @@ class DiscordOAuth:
     async def fetchUserId(self, code: str) -> int:
         if self._session is None:
             raise RuntimeError("DiscordOAuth.start() has not been called")
-        clientAuth = aiohttp.BasicAuth(self.clientId, self._clientSecret)
+        clientAuthHeaders = {"Authorization": aiohttp.encode_basic_auth(self.clientId, self._clientSecret)}
 
         async with self._session.post(
             f"{API_BASE_URL}/oauth2/token",
             data={"grant_type": "authorization_code", "code": code, "redirect_uri": self.redirectUri},
-            auth=clientAuth,
+            headers=clientAuthHeaders,
         ) as tokenResponse:
             if tokenResponse.status != 200:
                 # The response body is deliberately not logged, in case it
@@ -79,20 +79,20 @@ class DiscordOAuth:
                     raise OAuthError(f"user lookup failed with HTTP {userResponse.status}")
                 userPayload = await userResponse.json()
         finally:
-            await self._revoke(accessToken, clientAuth)
+            await self._revoke(accessToken, clientAuthHeaders)
 
         userId = userPayload.get("id")
         if not isinstance(userId, str) or not userId.isdigit():
             raise OAuthError("user lookup returned an unexpected payload")
         return int(userId)
 
-    async def _revoke(self, accessToken: str, clientAuth: aiohttp.BasicAuth) -> None:
+    async def _revoke(self, accessToken: str, clientAuthHeaders: dict[str, str]) -> None:
         assert self._session is not None
         try:
             async with self._session.post(
                 f"{API_BASE_URL}/oauth2/token/revoke",
                 data={"token": accessToken, "token_type_hint": "access_token"},
-                auth=clientAuth,
+                headers=clientAuthHeaders,
             ) as revokeResponse:
                 if revokeResponse.status != 200:
                     log.warning("could not revoke OAuth token (HTTP %s)", revokeResponse.status)
