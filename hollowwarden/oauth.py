@@ -95,11 +95,11 @@ class DiscordOAuth:
         """
         if self._session is None:
             raise RuntimeError("DiscordOAuth.start() has not been called")
-        clientAuth = aiohttp.BasicAuth(self.clientId, self._clientSecret)
+        clientAuthHeaders = {"Authorization": aiohttp.encode_basic_auth(self.clientId, self._clientSecret)}
         async with self._session.post(
             f"{API_BASE_URL}/oauth2/token",
             data={"grant_type": "client_credentials", "scope": "identify"},
-            auth=clientAuth,
+            headers=clientAuthHeaders,
         ) as tokenResponse:
             if tokenResponse.status in (400, 401):
                 # A wrong ID or secret is "invalid_client". Anything else is
@@ -112,10 +112,10 @@ class DiscordOAuth:
             tokenPayload = await tokenResponse.json()
         accessToken = tokenPayload.get("access_token")
         if isinstance(accessToken, str):
-            await self._revoke(accessToken, clientAuth)
+            await self._revoke(accessToken, clientAuthHeaders)
         return True
 
-    async def _revoke(self, accessToken: str, clientAuth: aiohttp.BasicAuth) -> None:
+    async def _revoke(self, accessToken: str, clientAuthHeaders: dict[str, str]) -> None:
         assert self._session is not None
         try:
             async with self._session.post(
