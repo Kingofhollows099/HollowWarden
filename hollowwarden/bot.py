@@ -136,16 +136,19 @@ class ReviewButton(
     """Approve or deny buttons on a review alert. The user ID lives in the
     custom_id, so the buttons keep working after a restart."""
 
-    def __init__(self, action: str, userId: int) -> None:
+    def __init__(self, action: str, userId: int, disabled: bool = False) -> None:
         isApprove = action == "approve"
         super().__init__(
             # Both neutral grey, told apart by symbol and label, so a red
-            # "go" button can't be mistaken for Deny at a glance.
+            # "go" button can't be mistaken for Deny at a glance. The symbol
+            # goes in the label, not the emoji field: Discord accepts only
+            # real emoji there, and ✓ (U+2713) isn't one. Using it made Discord
+            # reject every review message.
             discord.ui.Button(
-                label="Approve" if isApprove else "Deny",
-                emoji="✓" if isApprove else "⚠",
+                label="✓ Approve" if isApprove else "⚠ Deny",
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"hollowwarden:review:{action}:{userId}",
+                disabled=disabled,
             )
         )
         self.action = action
@@ -159,6 +162,20 @@ class ReviewButton(
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.client.handleReviewDecision(interaction, self.userId, self.action == "approve")
+
+
+def buildReviewMessage(
+    userId: int, reasons: list[str], needsDecision: bool, disabled: bool = False
+) -> dict[str, object]:
+    heading = "⚠  Held for review" if needsDecision else "⚠  Verified with flags"
+    embed = discord.Embed(title=heading, description=f"<@{userId}> (`{userId}`)", colour=ACCENT_COLOUR)
+    embed.add_field(name="Why", value="\n".join(f"• {reason}" for reason in reasons)[:1024], inline=False)
+    view = None
+    if needsDecision:
+        view = discord.ui.View(timeout=None)
+        view.add_item(ReviewButton("approve", userId, disabled=disabled))
+        view.add_item(ReviewButton("deny", userId, disabled=disabled))
+    return {"embed": embed, "view": view}
 
 
 class HollowWardenBot(discord.Client):
@@ -180,6 +197,7 @@ class HollowWardenBot(discord.Client):
         # Set by the entry point in web mode, so /test-config can check the
         # OAuth credentials.
         self.oauth: DiscordOAuth | None = None
+        self.lastModChannelError: str | None = None
         # Set by the entry point when VPN detection is on.
         self.vpnChecker: VpnChecker | None = None
 
@@ -396,12 +414,44 @@ class HollowWardenBot(discord.Client):
         except discord.HTTPException as error:
             findings.append(Finding(WARNING, f"Couldn't read the app's settings from Discord (HTTP {error.status})."))
         findings.append(await checkDatabase(self.storage))
+        findings.append(await self.checkReviewPost())
         if self.settings.web is not None:
             if self.oauth is not None:
                 findings.append(await checkOauthCredentials(self.oauth))
             findings.extend(await checkWebsite(self.settings.web))
             findings.append(checkVpnList(self.vpnChecker))
         return findings
+
+    async def checkReviewPost(self) -> Finding:
+        """Post a sample review and delete it straight away.
+
+        Checking permissions alone isn't enough: Discord can still reject a
+        message for its content (as an invalid button emoji once did). Members
+        who need review get "Verification unavailable" when that happens, so
+        try the real thing. The sample's buttons are disabled, so nothing
+        happens if it can't be deleted.
+        """
+        # Any real Discord ID fits the button format. The bot's own is used
+        # when logged in (always, in practice), the server's otherwise.
+        sampleUserId = self.user.id if self.user is not None else self.settings.guildId
+        sampleMessage = buildReviewMessage(
+            sampleUserId,
+            ["This is a test from /test-config. It will be deleted straight away."],
+            needsDecision=True,
+            disabled=True,
+        )
+        message = await self.sendToModChannel(**sampleMessage)
+        if message is None:
+            return Finding(
+                ERROR,
+                f"Review messages can't be posted ({self.lastModChannelError}). Members who need a "
+                "moderator's review will see \"Verification unavailable\" until this is fixed.",
+            )
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            return Finding(WARNING, "A test review posted fine, but couldn't be deleted. Delete it from the mod channel.")
+        return Finding(OK, "A test review message posted to the mod channel and was deleted.")
 
     def describeSettings(self) -> str:
         parts = [f"Method: **{self.settings.verifyMethod}**", f"Flagged members: **{self.settings.flaggedAction}**"]
@@ -470,35 +520,35 @@ class HollowWardenBot(discord.Client):
         await self.sendToModChannel(content=message)
 
     async def postReview(self, userId: int, reasons: list[str], needsDecision: bool) -> bool:
-        heading = "⚠  Held for review" if needsDecision else "⚠  Verified with flags"
-        embed = discord.Embed(title=heading, description=f"<@{userId}> (`{userId}`)", colour=ACCENT_COLOUR)
-        embed.add_field(name="Why", value="\n".join(f"• {reason}" for reason in reasons)[:1024], inline=False)
-        view = None
-        if needsDecision:
-            view = discord.ui.View(timeout=None)
-            view.add_item(ReviewButton("approve", userId))
-            view.add_item(ReviewButton("deny", userId))
-        return await self.sendToModChannel(embed=embed, view=view)
+        return await self.sendToModChannel(**buildReviewMessage(userId, reasons, needsDecision)) is not None
 
-    async def sendToModChannel(self, **messageFields) -> bool:
-        """Post to the mod channel. Returns False and logs the cause instead
-        of raising, so callers decide whether a failed post matters."""
+    async def sendToModChannel(self, **messageFields) -> discord.Message | None:
+        """Post to the mod channel. Returns None and logs the cause instead
+        of raising, so callers decide whether a failed post matters. The
+        cause is also kept in lastModChannelError for /test-config."""
+        self.lastModChannelError = None
         channel = await self.getModChannel()
         if channel is None:
-            log.error("MOD_CHANNEL_ID %s isn't a text channel HollowWarden can reach", self.settings.modChannelId)
-            return False
+            self.lastModChannelError = f"MOD_CHANNEL_ID {self.settings.modChannelId} isn't a text channel HollowWarden can reach"
+            log.error("%s", self.lastModChannelError)
+            return None
         try:
-            await channel.send(**messageFields)
+            return await channel.send(**messageFields)
         except discord.Forbidden:
-            log.error(
-                "can't post in MOD_CHANNEL_ID %s: give HollowWarden View Channel, Send Messages and Embed Links there",
-                self.settings.modChannelId,
+            self.lastModChannelError = (
+                f"can't post in MOD_CHANNEL_ID {self.settings.modChannelId}: give HollowWarden View Channel, "
+                "Send Messages and Embed Links there"
             )
-            return False
         except discord.HTTPException as error:
-            log.error("Discord rejected a post to MOD_CHANNEL_ID %s (HTTP %s)", self.settings.modChannelId, error.status)
-            return False
-        return True
+            # Discord's own explanation (such as "Invalid emoji") is the part
+            # that says what to fix. It describes our message, not a member.
+            detail = " ".join(str(error.text).split())[:300] or "no details given"
+            self.lastModChannelError = (
+                f"Discord rejected a post to MOD_CHANNEL_ID {self.settings.modChannelId} "
+                f"(HTTP {error.status}, code {error.code}: {detail})"
+            )
+        log.error("%s", self.lastModChannelError)
+        return None
 
     async def getModChannel(self) -> discord.abc.Messageable | None:
         channel = self.get_channel(self.settings.modChannelId)
