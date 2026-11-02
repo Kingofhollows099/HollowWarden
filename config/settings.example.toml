@@ -1,6 +1,7 @@
 # One server's settings. To add a server, copy this file into config/servers/
 # under any name made of letters, numbers, - and _, ending in .toml:
 #
+#   mkdir -p config/servers
 #   cp config/settings.example.toml config/servers/friends.toml
 #
 # The bot reads these files at startup (restart it after a change), and can't

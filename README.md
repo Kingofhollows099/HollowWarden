@@ -100,6 +100,8 @@ Create the secret files. `read -rs` keeps the token out of your shell
 history and off the screen:
 
 ```bash
+mkdir -p -m 700 secrets   # a private folder for the secret files
+
 read -rsp "Bot token: " value && printf '%s' "$value" > secrets/discord_bot_token; unset value; echo
 
 # Web mode: paste the client secret and generate a random IP hashing key.
@@ -251,6 +253,7 @@ channel that belongs to a different server.
 2. Create its settings:
    ```bash
    # any file name: letters, numbers, - and _, ending in .toml
+   mkdir -p config/servers
    cp config/settings.example.toml config/servers/gaming.toml
    nano config/servers/gaming.toml
    ```
@@ -270,6 +273,7 @@ a compromised Discord account can't add a server or change one's settings.
    `.env.before-servers`, and comments out the moved lines in `.env`:
    ```bash
    NAME=main   # the file name for this server: letters, numbers, - and _
+   mkdir -p config/servers
    setting() { local found; found=$(grep -E "^$1=" .env | tail -1 | cut -d= -f2- | tr -d '"' | xargs); echo "${found:-$2}"; }
    cat > "config/servers/$NAME.toml" <<EOF
    name = "$NAME"
