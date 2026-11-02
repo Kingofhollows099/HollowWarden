@@ -50,6 +50,8 @@ PER_SERVER_ENV_SETTINGS = (
     "MIN_ACCOUNT_AGE_DAYS",
     "FLAG_VPN",
     "IP_RETENTION_DAYS",
+    "RAID_THRESHOLD",
+    "RAID_WINDOW_MINUTES",
 )
 SERVER_FILE_KEYS = {
     "name",
@@ -62,7 +64,11 @@ SERVER_FILE_KEYS = {
     "min_account_age_days",
     "flag_vpn",
     "ip_retention_days",
+    "raid_threshold",
+    "raid_window_minutes",
 }
+DEFAULT_RAID_THRESHOLD = 10
+DEFAULT_RAID_WINDOW_MINUTES = 5
 
 
 class ConfigError(Exception):
@@ -102,6 +108,10 @@ class ServerSettings:
     minAccountAgeDays: int
     flagVpn: bool
     ipRetentionDays: int
+    # Raid protection: this many verification attempts within this many
+    # minutes starts a raid alert. 0 turns it off.
+    raidThreshold: int = DEFAULT_RAID_THRESHOLD
+    raidWindowMinutes: int = DEFAULT_RAID_WINDOW_MINUTES
 
 
 @dataclass(frozen=True)
@@ -209,6 +219,14 @@ def parseChoice(value: object, label: str, choices: tuple[str, ...]) -> str:
     if text not in choices:
         raise ConfigError(f"{label} must be one of: {', '.join(choices)}")
     return text
+
+
+def parseRaidThreshold(value: object, label: str) -> int:
+    threshold = parseInt(value, label, 0, 1000)
+    # 1 would make every single verification a "raid".
+    if threshold == 1:
+        raise ConfigError(f"{label} must be 0 (off) or at least 2")
+    return threshold
 
 
 def parseBool(value: object, label: str) -> bool:
@@ -325,6 +343,12 @@ def loadServerFromEnv(environ: dict[str, str]) -> ServerSettings:
         ipRetentionDays=readInt(
             "IP_RETENTION_DAYS", environ, default=DEFAULT_IP_RETENTION_DAYS, minimum=1, maximum=3650
         ),
+        raidThreshold=parseRaidThreshold(
+            environ.get("RAID_THRESHOLD", "").strip() or DEFAULT_RAID_THRESHOLD, "RAID_THRESHOLD"
+        ),
+        raidWindowMinutes=readInt(
+            "RAID_WINDOW_MINUTES", environ, default=DEFAULT_RAID_WINDOW_MINUTES, minimum=1, maximum=1440
+        ),
     )
 
 
@@ -358,6 +382,10 @@ def parseServerEntry(entry: dict[str, object], label: str, defaultName: str) -> 
         flagVpn=parseBool(entry.get("flag_vpn", True), f"{label}: flag_vpn"),
         ipRetentionDays=parseInt(
             entry.get("ip_retention_days", DEFAULT_IP_RETENTION_DAYS), f"{label}: ip_retention_days", 1, 3650
+        ),
+        raidThreshold=parseRaidThreshold(entry.get("raid_threshold", DEFAULT_RAID_THRESHOLD), f"{label}: raid_threshold"),
+        raidWindowMinutes=parseInt(
+            entry.get("raid_window_minutes", DEFAULT_RAID_WINDOW_MINUTES), f"{label}: raid_window_minutes", 1, 1440
         ),
     )
 

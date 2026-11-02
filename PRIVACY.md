@@ -23,6 +23,7 @@ depends on which one.
 | Your **Discord user ID** while you verify | To know who to give the Verified role to | A few minutes. CAPTCHA codes expire after 5 minutes and verification links after 10. |
 | Your **account's creation date** | Accounts younger than a set number of days are held for review, to stop throwaway accounts | Never stored. It's calculated from your Discord ID each time. |
 | A **pending review** (your Discord ID and the time) | If your verification is held, moderators need to approve or deny it | Until a moderator decides. Then it's deleted. |
+| A **raid record** (your Discord ID, when you verified, and any reasons you were flagged), only if you verified during a suspected raid | So moderators can review everyone involved in a raid together | **30 days** after the raid's last activity, then deleted automatically. |
 | **Messages in the server's private moderator channel** | To tell moderators who verified, who was held and why, and any moderator decisions or notes | These are ordinary Discord messages. They stay until a moderator deletes them. |
 | **Bot activity logs** on the operator's computer (Discord user IDs and what happened, e.g. "verified" or "held for review") | Troubleshooting and security | Logs are capped at about 30 MB, so older entries are overwritten automatically. |
 

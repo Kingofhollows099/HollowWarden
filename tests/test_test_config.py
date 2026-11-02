@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
-from aiohttp import web as aiohttpWeb
 
 from hollowwarden.bot import HollowWardenBot
 from hollowwarden.config import loadSettings

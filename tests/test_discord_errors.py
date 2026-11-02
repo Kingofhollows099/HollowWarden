@@ -144,8 +144,6 @@ class TestVerifierWhenModChannelFails:
         assert len(gateway.reviews) == 1
 
     async def test_allowModeStillVerifiesIfAlertFails(self, settings, storage):
-        from dataclasses import replace
-
         gateway = FakeGateway({NEW_USER: False})
         gateway.modChannelWorks = False
         verifier = Verifier(withServerSettings(settings, flaggedAction="allow"), storage, gateway)

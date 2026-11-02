@@ -9,6 +9,7 @@ decision logic with a fake gateway instead of a real bot.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 import time
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .config import ServerSettings, Settings
+from .raids import RaidDetector, RaidSummary
 from .storage import ServerStorage
 
 log = logging.getLogger(__name__)
@@ -57,6 +59,35 @@ class DiscordGateway(Protocol):
 
     async def postReview(self, guildId: int, userId: int, reasons: list[str], needsDecision: bool) -> bool: ...
 
+    async def postRaidAlert(self, guildId: int, summary: RaidSummary) -> int | None:
+        """Post the raid alert. Returns its message ID, or None if it couldn't be posted."""
+        ...
+
+    async def updateRaidAlert(self, guildId: int, messageId: int, summary: RaidSummary) -> None: ...
+
+    async def removeVerifiedRole(self, guildId: int, userId: int, auditReason: str) -> bool:
+        """True if the role was removed; False if they'd left or didn't have it."""
+        ...
+
+
+@dataclass(frozen=True)
+class RaidResolution:
+    approved: int = 0
+    denied: int = 0
+    rolesRemoved: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+    def describe(self, approve: bool) -> str:
+        parts = [f"{self.approved} verified" if approve else f"{self.denied} denied"]
+        if self.rolesRemoved:
+            parts.append(f"Verified role removed from {self.rolesRemoved} let in before detection")
+        if self.skipped:
+            parts.append(f"{self.skipped} already handled or gone")
+        if self.failed:
+            parts.append(f"{self.failed} failed (see the bot's logs)")
+        return ", ".join(parts) + "."
+
 
 def accountCreatedAt(userId: int) -> float:
     """Discord IDs encode their creation time, so no API call is needed."""
@@ -76,6 +107,11 @@ class Verifier:
         self.settings = settings
         self.storage = storage
         self.gateway = gateway
+        self.raidDetector = RaidDetector()
+        # One lock per server around raid bookkeeping, so concurrent attempts
+        # can't open two raids at once, and a moderator's "Approve all" or
+        # "Deny all" can't miss someone being added at the same moment.
+        self._raidLocks: dict[int, asyncio.Lock] = {}
 
     def serverSettings(self, guildId: int) -> ServerSettings:
         server = self.settings.server(guildId)
@@ -130,6 +166,11 @@ class Verifier:
             if matchedUserIds:
                 reasons.append(await self._describeMatches(guildId, matchedUserIds))
 
+        if server.raidThreshold:
+            raidOutcome = await self._holdIfRaid(server, userId, reasons, currentTime)
+            if raidOutcome is not None:
+                return raidOutcome
+
         if not reasons:
             await self.gateway.grantVerifiedRole(guildId, userId)
             await self.gateway.postModLog(guildId, f"✓  <@{userId}> (`{userId}`) verified by {method}.")
@@ -160,6 +201,153 @@ class Verifier:
         await self.storage.addPendingReview(guildId, userId, now=currentTime)
         log.info("user %s in server %s held for moderator review", userId, guildId)
         return Outcome.PENDING_REVIEW
+
+    def _raidLock(self, guildId: int) -> asyncio.Lock:
+        return self._raidLocks.setdefault(guildId, asyncio.Lock())
+
+    async def _holdIfRaid(self, server: ServerSettings, userId: int, reasons: list[str], now: float) -> Outcome | None:
+        """Count this attempt, and if the server is in a raid, hold the member
+        as part of it. Returns None when there's no raid, so normal
+        verification carries on.
+
+        During a raid every attempt is held, flagged or not, and added to one
+        raid alert instead of getting its own review message: a flood of
+        review messages is exactly what a raid would otherwise cause.
+        """
+        guildId = server.guildId
+        windowSeconds = server.raidWindowMinutes * 60
+        store = self.storage.forGuild(guildId)
+        async with self._raidLock(guildId):
+            recentUserIds = self.raidDetector.record(guildId, userId, now, windowSeconds)
+            raid = await store.findActiveRaid(activeSince=now - windowSeconds)
+            if raid is None:
+                if len(recentUserIds) < server.raidThreshold:
+                    return None
+                raidId = await store.createRaid(now=now)
+                log.warning(
+                    "possible raid in %s: %s verification attempts within %s minutes",
+                    server.name,
+                    len(recentUserIds),
+                    server.raidWindowMinutes,
+                )
+                await self._addEarlierAttempts(server, raidId, [uid for uid in recentUserIds if uid != userId], now)
+                raid = await store.getRaid(raidId)
+                assert raid is not None
+
+            await store.addRaidMember(raid.raidId, userId, verifiedBefore=False, reasons=reasons, now=now)
+            summary = await self.raidSummary(server, raid.raidId)
+            if raid.messageId is None:
+                # Post first, mark pending second, as with single reviews: if
+                # the alert can't be posted, nobody can act on this member.
+                messageId = await self.gateway.postRaidAlert(guildId, summary)
+                if messageId is None:
+                    await store.removeRaidMember(raid.raidId, userId)
+                    log.warning("user %s in %s couldn't be held: the raid alert couldn't be posted", userId, server.name)
+                    return Outcome.UNAVAILABLE
+                await store.setRaidMessage(raid.raidId, server.modChannelId, messageId)
+            else:
+                await self.gateway.updateRaidAlert(guildId, raid.messageId, summary)
+            await self.storage.addPendingReview(guildId, userId, now=now)
+        log.info("user %s in %s held as part of raid %s", userId, server.name, raid.raidId)
+        return Outcome.PENDING_REVIEW
+
+    async def _addEarlierAttempts(self, server: ServerSettings, raidId: int, earlierUserIds: list[int], now: float) -> None:
+        """When a raid is detected, the attempts that triggered it happened
+        before anyone knew. Include those who got in (so "Deny all" can take
+        their role back) and those already waiting for review."""
+        store = self.storage.forGuild(server.guildId)
+        for earlierUserId in earlierUserIds:
+            state = await self.gateway.getMemberState(server.guildId, earlierUserId)
+            if state.hasVerifiedRole:
+                await store.addRaidMember(raidId, earlierUserId, verifiedBefore=True, reasons=[], now=now)
+            elif state.isMember and await self.storage.hasPendingReview(server.guildId, earlierUserId):
+                await store.addRaidMember(
+                    raidId,
+                    earlierUserId,
+                    verifiedBefore=False,
+                    reasons=["Was already waiting for review when the raid was detected."],
+                    now=now,
+                )
+
+    async def raidSummary(self, server: ServerSettings, raidId: int, resultText: str | None = None) -> RaidSummary:
+        store = self.storage.forGuild(server.guildId)
+        raid = await store.getRaid(raidId)
+        if raid is None:
+            raise ValueError(f"raid {raidId} doesn't exist in {server.name}")
+        members = await store.listRaidMembers(raidId)
+        held = [member for member in members if not member.verifiedBefore]
+        return RaidSummary(
+            raidId=raidId,
+            startedAt=raid.startedAt,
+            memberCount=len(members),
+            heldCount=len(held),
+            verifiedBeforeCount=len(members) - len(held),
+            flaggedCount=sum(1 for member in held if member.reasons),
+            threshold=server.raidThreshold,
+            windowMinutes=server.raidWindowMinutes,
+            decision=raid.decision,
+            decidedBy=raid.decidedBy,
+            resultText=resultText,
+        )
+
+    async def resolveRaid(self, guildId: int, raidId: int, approve: bool, adminId: int) -> RaidResolution | None:
+        """Approve or deny everyone in a raid. Returns None if it was already
+        decided (or doesn't exist in this server).
+
+        Approve verifies everyone still held. Deny keeps everyone held out and
+        also removes the Verified role from anyone let in before the raid was
+        detected. People handled one by one in the meantime (by /verify-member,
+        say) are left as they are.
+        """
+        server = self.serverSettings(guildId)
+        store = self.storage.forGuild(guildId)
+        async with self._raidLock(guildId):
+            if await store.getRaid(raidId) is None:
+                return None
+            if not await store.claimRaidDecision(raidId, "approved" if approve else "denied", adminId):
+                return None
+            counts = {"approved": 0, "denied": 0, "rolesRemoved": 0, "skipped": 0, "failed": 0}
+            for member in await store.listRaidMembers(raidId):
+                if member.verifiedBefore:
+                    if approve:
+                        continue
+                    try:
+                        removed = await self.gateway.removeVerifiedRole(
+                            guildId, member.userId, auditReason=f"Raid denied by admin {adminId}"
+                        )
+                    except Exception:
+                        log.exception("couldn't remove the Verified role from %s in %s", member.userId, server.name)
+                        counts["failed"] += 1
+                        continue
+                    counts["rolesRemoved" if removed else "skipped"] += 1
+                    continue
+                if not await self.storage.popPendingReview(guildId, member.userId):
+                    counts["skipped"] += 1
+                    continue
+                if not approve:
+                    counts["denied"] += 1
+                    continue
+                try:
+                    await self.gateway.grantVerifiedRole(
+                        guildId, member.userId, auditReason=f"Raid approved by admin {adminId}"
+                    )
+                except Exception:
+                    log.exception("couldn't verify %s in %s while approving a raid", member.userId, server.name)
+                    # Keep them held so they can still be handled one by one.
+                    await self.storage.addPendingReview(guildId, member.userId)
+                    counts["failed"] += 1
+                    continue
+                counts["approved"] += 1
+        resolution = RaidResolution(**counts)
+        log.info(
+            "raid %s in %s %s by %s: %s",
+            raidId,
+            server.name,
+            "approved" if approve else "denied",
+            adminId,
+            resolution.describe(approve),
+        )
+        return resolution
 
     async def _describeMatches(self, guildId: int, matchedUserIds: list[int]) -> str:
         descriptions = []

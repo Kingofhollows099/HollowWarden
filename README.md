@@ -100,6 +100,8 @@ Create the secret files. `read -rs` keeps the token out of your shell
 history and off the screen:
 
 ```bash
+mkdir -p -m 700 secrets   # a private folder for the secret files
+
 read -rsp "Bot token: " value && printf '%s' "$value" > secrets/discord_bot_token; unset value; echo
 
 # Web mode: paste the client secret and generate a random IP hashing key.
@@ -230,8 +232,8 @@ data volume: servers/<guild id>/hollowwarden.db   ← each server's own database
 ```
 
 **What's per server:** verification method, flagged action, minimum account
-age, VPN flagging, IP retention, the Verified role, the mod channel and the
-admin roles. **What's shared:** the bot itself, and for web verification the
+age, VPN flagging, IP retention, raid protection, the Verified role, the mod
+channel and the admin roles. **What's shared:** the bot itself, and for web verification the
 website (`PUBLIC_BASE_URL`), the OAuth app (`DISCORD_CLIENT_ID`),
 `TRUSTED_PROXIES`, `CLIENT_IP_HEADER` and the VPN list. So all web-mode
 servers verify through the same site.
@@ -251,6 +253,7 @@ channel that belongs to a different server.
 2. Create its settings:
    ```bash
    # any file name: letters, numbers, - and _, ending in .toml
+   mkdir -p config/servers
    cp config/settings.example.toml config/servers/gaming.toml
    nano config/servers/gaming.toml
    ```
@@ -270,6 +273,7 @@ a compromised Discord account can't add a server or change one's settings.
    `.env.before-servers`, and comments out the moved lines in `.env`:
    ```bash
    NAME=main   # the file name for this server: letters, numbers, - and _
+   mkdir -p config/servers
    setting() { local found; found=$(grep -E "^$1=" .env | tail -1 | cut -d= -f2- | tr -d '"' | xargs); echo "${found:-$2}"; }
    cat > "config/servers/$NAME.toml" <<EOF
    name = "$NAME"
@@ -311,6 +315,30 @@ records are still deleted on the normal schedule. Delete
 - **Held for review:** a message appears in the mod channel explaining why,
   with **Approve** and **Deny** buttons. Only bot admins can use them, and
   the bot checks that on every click.
+- **Raid protection:** if `raid_threshold` people (default 10) try to verify
+  within `raid_window_minutes` (default 5), the bot treats it as a raid.
+  Everyone verifying from then on is held, flagged or not, and the mod
+  channel gets **one** "⚠ Possible raid" alert instead of a message per
+  person. The alert keeps a running count and has three buttons:
+  - **List members:** privately shows everyone in the raid, how old each
+    account is, whether they're held or were let in before the raid was
+    spotted, and any other reasons they were flagged. Long lists come as a
+    text file.
+  - **Approve all:** verifies everyone still held.
+  - **Deny all:** keeps everyone held out, **and** removes the Verified role
+    from anyone let in during the burst before it was detected.
+
+  Both ask you to confirm first. Members you've already handled one by one
+  (for example with `/verify-member`) are left as they are. The raid ends
+  once a full window passes with no new attempts; after a decision, a burst
+  that's still going opens a new alert.
+
+  What's counted is *verification attempts* (people passing the CAPTCHA or
+  finishing the web login), not raw joins. Seeing every join would need
+  Discord's privileged Server Members intent, and accounts that join but
+  never verify can't see anything anyway. To keep the alert in step with a
+  fast raid without hitting Discord's rate limits, it's updated at most every
+  few seconds. `/test-config` posts a sample alert to check it works.
 - **Manually verifying someone:** an admin can skip all checks for a person
   they vouch for. Use `/verify-member member:@them note:why`, or right-click
   the member → **Apps → Verify member**. Only bot admins can do this. Every

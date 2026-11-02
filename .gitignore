@@ -1,7 +1,6 @@
 # Never commit secrets or local config
 .env
-secrets/*
-!secrets/README.md
+secrets/
 
 # Local data
 *.db

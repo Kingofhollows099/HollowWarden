@@ -1,6 +1,7 @@
 # One server's settings. To add a server, copy this file into config/servers/
 # under any name made of letters, numbers, - and _, ending in .toml:
 #
+#   mkdir -p config/servers
 #   cp config/settings.example.toml config/servers/friends.toml
 #
 # The bot reads these files at startup (restart it after a change), and can't
@@ -45,3 +46,10 @@ flag_vpn = true
 
 # Web method only: days to keep IP hashes before deleting them.
 ip_retention_days = 180
+
+# Raid protection. If this many people try to verify within this many
+# minutes, it's treated as a raid: everyone verifying is held for review, and
+# moderators get ONE alert (with Approve all / Deny all / List members)
+# instead of a message per person. Set raid_threshold = 0 to turn it off.
+raid_threshold = 10
+raid_window_minutes = 5

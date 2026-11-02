@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -23,6 +24,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -36,7 +38,9 @@ class MigrationError(Exception):
 
 # Every table is keyed by guild_id, so each server's data stays separate:
 # a member is only ever matched against others in the same server.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# Raid records are kept this long after a raid's last activity, then deleted.
+RAID_RETENTION_SECONDS = 30 * 86400
 SCHEMA_TABLES = {
     "verify_tokens": """CREATE TABLE IF NOT EXISTS verify_tokens (
         token_hash TEXT PRIMARY KEY,
@@ -66,10 +70,58 @@ SCHEMA_TABLES = {
         PRIMARY KEY (guild_id, user_id)
     )""",
 }
+# A raid incident groups the verification attempts made during one burst.
+# raid_members.verified_before marks people who were already let in before
+# the burst was detected; "Deny all" removes their Verified role.
+SCHEMA_TABLES["raid_incidents"] = """CREATE TABLE IF NOT EXISTS raid_incidents (
+        raid_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at INTEGER NOT NULL,
+        last_activity_at INTEGER NOT NULL,
+        channel_id INTEGER,
+        message_id INTEGER,
+        decision TEXT,
+        decided_by INTEGER,
+        decided_at INTEGER
+    )"""
+SCHEMA_TABLES["raid_members"] = """CREATE TABLE IF NOT EXISTS raid_members (
+        raid_id INTEGER NOT NULL REFERENCES raid_incidents (raid_id),
+        user_id INTEGER NOT NULL,
+        added_at INTEGER NOT NULL,
+        verified_before INTEGER NOT NULL,
+        reasons TEXT NOT NULL,
+        PRIMARY KEY (raid_id, user_id)
+    )"""
+
 SCHEMA_INDEXES = (
     "CREATE INDEX IF NOT EXISTS verify_tokens_by_member ON verify_tokens (guild_id, user_id)",
     "CREATE INDEX IF NOT EXISTS ip_records_by_guild_hash ON ip_records (guild_id, ip_hash)",
 )
+
+
+@dataclass(frozen=True)
+class RaidIncident:
+    raidId: int
+    startedAt: int
+    lastActivityAt: int
+    channelId: int | None
+    messageId: int | None
+    decision: str | None
+    decidedBy: int | None
+
+
+@dataclass(frozen=True)
+class RaidMember:
+    userId: int
+    addedAt: int
+    verifiedBefore: bool
+    reasons: tuple[str, ...]
+
+
+RAID_COLUMNS = "raid_id, started_at, last_activity_at, channel_id, message_id, decision, decided_by"
+
+
+def raidFromRow(row: tuple) -> RaidIncident:
+    return RaidIncident(*row)
 
 
 def sha256Hex(value: str) -> str:
@@ -129,8 +181,13 @@ class Storage:
         ten minutes, so they're simply dropped; anyone mid-verification
         clicks Verify again.
         """
+        # Only the tables from before multi-server support. Later tables (the
+        # raid ones) never had a guild_id, since each database already
+        # belongs to one server, so they mustn't make this look like an old
+        # database.
         tableColumns = {
-            table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")} for table in SCHEMA_TABLES
+            table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            for table in ("verify_tokens", "oauth_states", "ip_records", "pending_reviews")
         }
         if not any(columns and "guild_id" not in columns for columns in tableColumns.values()):
             return
@@ -314,6 +371,107 @@ class Storage:
 
         return await self._run(pop)
 
+    # Raid protection
+
+    async def findActiveRaid(self, activeSince: float) -> RaidIncident | None:
+        """The undecided raid with activity since activeSince, if any."""
+
+        def find() -> RaidIncident | None:
+            row = self.connection.execute(
+                f"SELECT {RAID_COLUMNS} FROM raid_incidents WHERE decision IS NULL AND last_activity_at >= ? "
+                "ORDER BY raid_id DESC LIMIT 1",
+                (int(activeSince),),
+            ).fetchone()
+            return raidFromRow(row) if row else None
+
+        return await self._run(find)
+
+    async def createRaid(self, now: float | None = None) -> int:
+        currentTime = int(time.time() if now is None else now)
+
+        def insert() -> int:
+            with self.connection:
+                cursor = self.connection.execute(
+                    "INSERT INTO raid_incidents (started_at, last_activity_at) VALUES (?, ?)", (currentTime, currentTime)
+                )
+            return int(cursor.lastrowid)
+
+        return await self._run(insert)
+
+    async def getRaid(self, raidId: int) -> RaidIncident | None:
+        def get() -> RaidIncident | None:
+            row = self.connection.execute(
+                f"SELECT {RAID_COLUMNS} FROM raid_incidents WHERE raid_id = ?", (raidId,)
+            ).fetchone()
+            return raidFromRow(row) if row else None
+
+        return await self._run(get)
+
+    async def setRaidMessage(self, raidId: int, channelId: int, messageId: int) -> None:
+        def update() -> None:
+            with self.connection:
+                self.connection.execute(
+                    "UPDATE raid_incidents SET channel_id = ?, message_id = ? WHERE raid_id = ?",
+                    (channelId, messageId, raidId),
+                )
+
+        await self._run(update)
+
+    async def addRaidMember(
+        self, raidId: int, userId: int, verifiedBefore: bool, reasons: list[str], now: float | None = None
+    ) -> None:
+        currentTime = int(time.time() if now is None else now)
+
+        def insert() -> None:
+            with self.connection:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO raid_members (raid_id, user_id, added_at, verified_before, reasons) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (raidId, userId, currentTime, int(verifiedBefore), json.dumps(reasons)),
+                )
+                self.connection.execute(
+                    "UPDATE raid_incidents SET last_activity_at = MAX(last_activity_at, ?) WHERE raid_id = ?",
+                    (currentTime, raidId),
+                )
+
+        await self._run(insert)
+
+    async def removeRaidMember(self, raidId: int, userId: int) -> None:
+        def delete() -> None:
+            with self.connection:
+                self.connection.execute(
+                    "DELETE FROM raid_members WHERE raid_id = ? AND user_id = ?", (raidId, userId)
+                )
+
+        await self._run(delete)
+
+    async def listRaidMembers(self, raidId: int) -> list[RaidMember]:
+        def listMembers() -> list[RaidMember]:
+            rows = self.connection.execute(
+                "SELECT user_id, added_at, verified_before, reasons FROM raid_members WHERE raid_id = ? "
+                "ORDER BY added_at, user_id",
+                (raidId,),
+            ).fetchall()
+            return [RaidMember(int(row[0]), int(row[1]), bool(row[2]), tuple(json.loads(row[3]))) for row in rows]
+
+        return await self._run(listMembers)
+
+    async def claimRaidDecision(self, raidId: int, decision: str, decidedBy: int, now: float | None = None) -> bool:
+        """Record a decision. Returns False if one was already made, so two
+        moderators clicking at once can't both act on the same raid."""
+        currentTime = int(time.time() if now is None else now)
+
+        def claim() -> bool:
+            with self.connection:
+                cursor = self.connection.execute(
+                    "UPDATE raid_incidents SET decision = ?, decided_by = ?, decided_at = ? "
+                    "WHERE raid_id = ? AND decision IS NULL",
+                    (decision, decidedBy, currentTime, raidId),
+                )
+            return cursor.rowcount > 0
+
+        return await self._run(claim)
+
     # Housekeeping
 
     async def purgeExpired(
@@ -333,6 +491,15 @@ class Storage:
             with self.connection:
                 self.connection.execute("DELETE FROM verify_tokens WHERE expires_at < ?", (currentTime,))
                 self.connection.execute("DELETE FROM oauth_states WHERE expires_at < ?", (currentTime,))
+                # Raid records name who verified during a suspected raid, so
+                # they don't stay forever either.
+                raidCutoff = currentTime - RAID_RETENTION_SECONDS
+                self.connection.execute(
+                    "DELETE FROM raid_members WHERE raid_id IN "
+                    "(SELECT raid_id FROM raid_incidents WHERE last_activity_at < ?)",
+                    (raidCutoff,),
+                )
+                self.connection.execute("DELETE FROM raid_incidents WHERE last_activity_at < ?", (raidCutoff,))
                 for guildId, retentionSeconds in retentionByGuild.items():
                     self.connection.execute(
                         "DELETE FROM ip_records WHERE guild_id = ? AND last_seen < ?",
