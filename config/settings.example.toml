@@ -1,9 +1,7 @@
-# One server's settings. To add a server, make a directory for it under
-# config/servers/ (any name: letters, numbers, - and _) and copy this file
-# into it as settings.toml. For example:
+# One server's settings. To add a server, copy this file into config/servers/
+# under any name made of letters, numbers, - and _, ending in .toml:
 #
-#   mkdir config/servers/friends
-#   cp config/settings.example.toml config/servers/friends/settings.toml
+#   cp config/settings.example.toml config/servers/friends.toml
 #
 # The bot reads these files at startup (restart it after a change), and can't
 # change them: the config folder is mounted read-only. Each server's data is
@@ -13,7 +11,7 @@
 # right-click the server, role or channel and choose Copy ID. Put them in
 # quotes, as below.
 
-# Shown in logs and in /test-config. Defaults to the directory's name.
+# Shown in logs and in /test-config. Defaults to the file name (friends).
 name = "Friends"
 
 # The server, the role that verified members get, and the private channel

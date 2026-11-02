@@ -1,4 +1,4 @@
-"""Multiple servers: per-server settings directories, separate data, and
+"""Multiple servers: one settings file per server, separate data, and
 isolation (nothing from one server ever affects or shows up in another)."""
 
 import logging
@@ -67,21 +67,19 @@ def toToml(values):
 
 
 def writeServers(tmp_path, servers):
-    """servers: {directory name: settings dict or raw text}."""
+    """servers: {file name without .toml: settings dict or raw text}."""
     serversDirectory = tmp_path / "config" / "servers"
     serversDirectory.mkdir(parents=True, exist_ok=True)
-    (serversDirectory / "README.md").write_text("Files directly in this folder are ignored.")
+    (serversDirectory / "README.md").write_text("Files that don't end in .toml are ignored.")
     for name, values in servers.items():
-        (serversDirectory / name).mkdir()
-        if values is not None:
-            text = values if isinstance(values, str) else toToml(values)
-            (serversDirectory / name / "settings.toml").write_text(text)
+        text = values if isinstance(values, str) else toToml(values)
+        (serversDirectory / f"{name}.toml").write_text(text)
     return serversDirectory
 
 
 def environWithServers(tmp_path, servers, **overrides):
     environ = webEnviron(tmp_path, SERVERS_DIR=str(writeServers(tmp_path, servers)), TRUSTED_PROXIES="127.0.0.1/32")
-    # Per-server settings live in each settings.toml, not .env.
+    # Per-server settings live in each server's .toml file, not .env.
     for name in ("GUILD_ID", "VERIFIED_ROLE_ID", "MOD_CHANNEL_ID", "ADMIN_ROLE_IDS", "VERIFY_METHOD"):
         environ.pop(name, None)
     environ.update(overrides)
@@ -101,10 +99,10 @@ async def twoStores(tmp_path):
     await stores.close()
 
 
-class TestServerDirectories:
+class TestServerFiles:
     def test_eachServerLoadsItsOwnSettings(self, twoServers):
         friends, gaming = twoServers.servers[FRIENDS], twoServers.servers[GAMING]
-        assert friends.name == "friends"  # defaults to the directory name
+        assert friends.name == "friends"  # defaults to the file name
         assert gaming.name == "Gaming"
         assert (friends.verifyMethod, gaming.verifyMethod) == ("web", "captcha")
         assert (friends.flaggedAction, gaming.flaggedAction) == ("review", "allow")
@@ -130,7 +128,6 @@ class TestServerDirectories:
         "servers, expected",
         [
             ({"friends": friendsSettings(admin_roles=["1"])}, "unknown setting"),  # typo of admin_role_ids
-            ({"friends": None}, "settings.toml is missing"),
             ({"friends": "guild_id = "}, "isn't valid TOML"),
             ({"bad name!": friendsSettings()}, "use only letters"),
             ({"friends": friendsSettings(verify_method="sms")}, "verify_method must be one of"),
@@ -146,6 +143,21 @@ class TestServerDirectories:
     def test_mistakesAreRejectedClearly(self, tmp_path, servers, expected):
         with pytest.raises(ConfigError, match=expected):
             loadSettings(environWithServers(tmp_path, servers))
+
+    def test_folderFromTheFirstLayoutGivesTheMoveCommand(self, tmp_path):
+        serversDirectory = writeServers(tmp_path, {"gaming": gamingSettings()})
+        (serversDirectory / "friends").mkdir()
+        (serversDirectory / "friends" / "settings.toml").write_text(toToml(friendsSettings()))
+        environ = environWithServers(tmp_path, {})
+        with pytest.raises(ConfigError, match=r"servers/friends/ is a folder\. Move it with: mv .*friends/settings\.toml .*friends\.toml"):
+            loadSettings(environ)
+
+    def test_otherFilesAreIgnored(self, tmp_path):
+        serversDirectory = writeServers(tmp_path, {"friends": friendsSettings()})
+        (serversDirectory / "notes.txt").write_text("not a server")
+        (serversDirectory / "friends.toml.bak").write_text("an old copy")
+        (serversDirectory / ".hidden.toml").write_text("an editor's temporary file")
+        assert list(loadSettings(environWithServers(tmp_path, {})).servers) == [FRIENDS]
 
     def test_perServerSettingsLeftInEnvAreRejected(self, tmp_path):
         environ = environWithServers(tmp_path, {"friends": friendsSettings()}, GUILD_ID=str(FRIENDS))

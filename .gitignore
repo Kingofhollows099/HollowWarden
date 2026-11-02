@@ -18,4 +18,4 @@ __pycache__/
 docker-compose.override.yml
 
 # Your servers' settings: they're yours, and a pull should never touch them.
-config/servers/*/
+config/servers/*.toml

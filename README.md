@@ -224,8 +224,8 @@ One bot can protect several servers. Each server has its own settings and
 its own separate data:
 
 ```
-config/servers/friends/settings.toml    ← each server's settings (read-only to the bot)
-config/servers/gaming/settings.toml
+config/servers/friends.toml    ← each server's settings (read-only to the bot)
+config/servers/gaming.toml
 data volume: servers/<guild id>/hollowwarden.db   ← each server's own database
 ```
 
@@ -250,38 +250,58 @@ channel that belongs to a different server.
    and give the bot's role the channel permissions.
 2. Create its settings:
    ```bash
-   mkdir config/servers/gaming        # any name: letters, numbers, - and _
-   cp config/settings.example.toml config/servers/gaming/settings.toml
-   nano config/servers/gaming/settings.toml
+   # any file name: letters, numbers, - and _, ending in .toml
+   cp config/settings.example.toml config/servers/gaming.toml
+   nano config/servers/gaming.toml
    ```
 3. Run `docker compose up -d`, then `/test-config` in that server. It only
    reports on the server it's run in.
 
-The bot leaves any server that doesn't have a settings directory. Servers can
+The bot leaves any server that doesn't have a settings file. Servers can
 only be added by editing these files on your machine, never from Discord, so
 a compromised Discord account can't add a server or change one's settings.
 
 **Moving from `.env` to settings files.** Your existing one-server setup in
 `.env` keeps working, and nothing needs to change. To add a second server:
 
-1. Create `config/servers/<name>/settings.toml` for your **existing** server,
-   copying the values from `.env` (`GUILD_ID` becomes `guild_id`, and so on;
-   `ADMIN_ROLE_IDS` becomes a list like `["123…", "456…"]`).
-2. Add the new server's directory the same way.
-3. Delete the server lines from `.env` (`GUILD_ID` down to
-   `IP_RETENTION_DAYS`). The bot refuses to start if both are set, so it's
-   never unclear which applies.
-4. If you used the bot **before** multi-server support, set
-   `LEGACY_DATA_GUILD_ID` in `.env` to your original server's `guild_id`. The
-   bot then moves its existing data (alt history, pending reviews) into that
-   server's directory. With only one server this happens automatically.
-5. Run `docker compose up -d`.
+1. Turn your **existing** server's `.env` settings into its own file. This
+   writes `config/servers/main.toml` from your `.env` values (using the
+   defaults for any setting your `.env` predates), saves a backup as
+   `.env.before-servers`, and comments out the moved lines in `.env`:
+   ```bash
+   NAME=main   # the file name for this server: letters, numbers, - and _
+   setting() { local found; found=$(grep -E "^$1=" .env | tail -1 | cut -d= -f2- | tr -d '"' | xargs); echo "${found:-$2}"; }
+   cat > "config/servers/$NAME.toml" <<EOF
+   name = "$NAME"
+   guild_id = "$(setting GUILD_ID)"
+   verified_role_id = "$(setting VERIFIED_ROLE_ID)"
+   mod_channel_id = "$(setting MOD_CHANNEL_ID)"
+   admin_role_ids = [$(setting ADMIN_ROLE_IDS | tr -d ' ' | sed 's/[^,][^,]*/"&"/g; s/,/, /g')]
+   verify_method = "$(setting VERIFY_METHOD captcha)"
+   flagged_action = "$(setting FLAGGED_ACTION review)"
+   min_account_age_days = $(setting MIN_ACCOUNT_AGE_DAYS 7)
+   flag_vpn = $(setting FLAG_VPN true)
+   ip_retention_days = $(setting IP_RETENTION_DAYS 180)
+   EOF
+   cp .env .env.before-servers
+   sed -i -E 's/^(GUILD_ID|VERIFIED_ROLE_ID|MOD_CHANNEL_ID|ADMIN_ROLE_IDS|VERIFY_METHOD|FLAGGED_ACTION|MIN_ACCOUNT_AGE_DAYS|FLAG_VPN|IP_RETENTION_DAYS)=/# moved to config\/servers\/'"$NAME"'.toml: \1=/' .env
+   cat "config/servers/$NAME.toml"
+   ```
+   Check what it prints. The bot refuses to start if a server setting is in
+   both `.env` and a server file, so it's never unclear which applies.
+2. Add the new server's file as described above.
+3. If you used the bot **before** multi-server support and haven't started
+   this version yet with only one server, set `LEGACY_DATA_GUILD_ID` in `.env`
+   to your original server's `guild_id`, so its existing data (alt history,
+   pending reviews) goes to the right server. With only one server this
+   happens automatically.
+4. Run `docker compose up -d`.
 
 The move from the single old database is careful: it happens in one step that
 either fully succeeds or changes nothing, and it never overwrites an existing
 server database.
 
-**Removing a server:** delete its settings directory and restart, and the bot
+**Removing a server:** delete its settings file and restart, and the bot
 leaves it. Its data directory stays, so nothing is lost by accident, but its IP
 records are still deleted on the normal schedule. Delete
 `servers/<guild id>/` from the data volume to remove the rest.
@@ -298,7 +318,7 @@ records are still deleted on the normal schedule. Delete
   admin is also named in Discord's audit log. If the person was waiting for
   review, that review closes.
 - **Changing who's a bot admin:** edit `ADMIN_ROLE_IDS` in `.env` (or
-  `admin_role_ids` in that server's `settings.toml`), then run
+  `admin_role_ids` in that server's file in `config/servers/`), then run
   `docker compose up -d`. Changes to *who holds* those roles take effect
   immediately, with no restart. Bot commands are visible to every member
   (non-admins get "Only bot admins can do that"). To hide them, go to **Server

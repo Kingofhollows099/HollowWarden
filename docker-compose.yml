@@ -19,7 +19,7 @@ services:
       - ip_hash_key
     volumes:
       - hollowwarden-data:/data
-      # Each server's settings, one directory per server. Read-only, so the
+      # Each server's settings, one file per server. Read-only, so the
       # bot can't change its own configuration even if it were compromised.
       - ./config:/config:ro
     labels:
