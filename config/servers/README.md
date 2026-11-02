@@ -1,6 +1,7 @@
-One directory per server, each holding a `settings.toml`. Copy
+One file per server, such as `friends.toml`. Copy
 `../settings.example.toml` to start one. See the main README's
 "Multiple servers" section.
 
-If this folder has no server directories, the bot uses the single server
-configured in `.env` instead.
+Files that don't end in `.toml` (like this one) are ignored. If this folder
+has no `.toml` files, the bot uses the single server configured in `.env`
+instead.

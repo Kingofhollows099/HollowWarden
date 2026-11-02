@@ -9,12 +9,12 @@ Everything is validated once at startup so a misconfiguration stops the bot
 immediately with a clear message, instead of failing halfway through
 verifying someone.
 
-Each server has its own directory under SERVERS_DIR (default
-/config/servers), holding its settings.toml. That location is mounted
-read-only and only the operator can edit it. It's deliberately not
-configurable from Discord: whoever took over a Discord admin account could
-otherwise change how their server verifies people, or add a server. With no
-server directories, the single server described in .env is used, as before.
+Each server has its own settings file, SERVERS_DIR/<name>.toml (default
+/config/servers). That location is mounted read-only and only the operator
+can edit it. It's deliberately not configurable from Discord: whoever took
+over a Discord admin account could otherwise change how their server
+verifies people, or add a server. With no server files, the single server
+described in .env is used, as before.
 """
 
 from __future__ import annotations
@@ -35,11 +35,11 @@ CLIENT_IP_HEADER_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 SNOWFLAKE_PATTERN = re.compile(r"^[0-9]{15,21}$")
 MIN_IP_HASH_KEY_LENGTH = 32
 DEFAULT_SERVERS_DIR = "/config/servers"
-SERVER_SETTINGS_FILENAME = "settings.toml"
-SERVER_DIRECTORY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+SERVER_FILE_SUFFIX = ".toml"
+SERVER_FILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 DEFAULT_IP_RETENTION_DAYS = 180
-# Settings that belong to one server. With server directories they go in
-# each settings.toml, so finding any of them in .env as well is ambiguous.
+# Settings that belong to one server. With server files they go in each
+# <name>.toml, so finding any of them in .env as well is ambiguous.
 PER_SERVER_ENV_SETTINGS = (
     "GUILD_ID",
     "VERIFIED_ROLE_ID",
@@ -362,33 +362,40 @@ def parseServerEntry(entry: dict[str, object], label: str, defaultName: str) -> 
     )
 
 
-def loadServerDirectories(serversDirectory: Path) -> list[ServerSettings]:
-    """Read servers/<directory>/settings.toml for each server directory.
+def loadServerFiles(serversDirectory: Path) -> list[ServerSettings]:
+    """Read every <name>.toml directly inside serversDirectory, one per server.
 
-    Files directly inside serversDirectory (such as a README) are ignored,
-    but every subdirectory must hold a settings file: a directory without one
-    is far more likely a mistake than something to skip quietly.
+    Other files (such as the README) are ignored. A subdirectory isn't: the
+    first version of multi-server support used <name>/settings.toml, so one
+    of those is pointed out rather than quietly skipped, which would leave
+    that server unconfigured without any warning.
     """
     servers = []
-    for directory in sorted(path for path in serversDirectory.iterdir() if path.is_dir()):
-        if directory.name.startswith("."):
+    for path in sorted(serversDirectory.iterdir()):
+        if path.name.startswith("."):
             continue
-        if not SERVER_DIRECTORY_PATTERN.match(directory.name):
-            raise ConfigError(
-                f"server directory {directory.name!r}: use only letters, numbers, - and _ in its name"
+        if path.is_dir():
+            oldSettings = path / "settings.toml"
+            hint = (
+                f" Move it with: mv {oldSettings} {serversDirectory / path.name}{SERVER_FILE_SUFFIX} "
+                f"&& rmdir {path}"
+                if oldSettings.exists()
+                else " Server settings go in files like servers/friends.toml, not in folders."
             )
-        label = f"servers/{directory.name}/{SERVER_SETTINGS_FILENAME}"
-        settingsPath = directory / SERVER_SETTINGS_FILENAME
+            raise ConfigError(f"servers/{path.name}/ is a folder.{hint}")
+        if path.suffix != SERVER_FILE_SUFFIX:
+            continue
+        if not SERVER_FILE_NAME_PATTERN.match(path.stem):
+            raise ConfigError(f"server file {path.name!r}: use only letters, numbers, - and _ in its name")
+        label = f"servers/{path.name}"
         try:
-            with settingsPath.open("rb") as settingsFile:
+            with path.open("rb") as settingsFile:
                 entry = tomllib.load(settingsFile)
-        except FileNotFoundError:
-            raise ConfigError(f"{label} is missing; every server directory needs one") from None
         except OSError as error:
             raise ConfigError(f"could not read {label}: {error.strerror}") from None
         except tomllib.TOMLDecodeError as error:
             raise ConfigError(f"{label} isn't valid TOML: {error}") from None
-        servers.append(parseServerEntry(entry, label, defaultName=directory.name))
+        servers.append(parseServerEntry(entry, label, defaultName=path.stem))
     return servers
 
 
@@ -408,13 +415,13 @@ def checkServersAreDistinct(servers: list[ServerSettings]) -> None:
 def loadSettings(environ: dict[str, str] | None = None) -> Settings:
     environ = dict(os.environ if environ is None else environ)
     serversDirectory = Path(environ.get("SERVERS_DIR", "").strip() or DEFAULT_SERVERS_DIR)
-    servers = loadServerDirectories(serversDirectory) if serversDirectory.is_dir() else []
+    servers = loadServerFiles(serversDirectory) if serversDirectory.is_dir() else []
     if servers:
         conflicting = [name for name in PER_SERVER_ENV_SETTINGS if environ.get(name, "").strip()]
         if conflicting:
             raise ConfigError(
                 f"{', '.join(conflicting)} are set in .env, but servers are configured in {serversDirectory}. "
-                "Move them into each server's settings.toml and delete them from .env, so there's only one source"
+                "Move them into each server's .toml file and delete them from .env, so there's only one source"
             )
         checkServersAreDistinct(servers)
     else:
