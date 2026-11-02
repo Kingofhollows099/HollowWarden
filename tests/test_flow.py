@@ -34,6 +34,9 @@ class FakeGateway:
         self.auditReasons = []
         self.logs = []
         self.reviews = []
+        self.raidAlerts = []
+        self.raidAlertUpdates = []
+        self.removed = []
         # Set False to act like the real gateway when Discord refuses a post
         # to the mod channel: nothing is posted, nothing is raised.
         self.modChannelWorks = True
@@ -56,6 +59,22 @@ class FakeGateway:
         if self.modChannelWorks:
             self.reviews.append((userId, reasons, needsDecision))
         return self.modChannelWorks
+
+    async def postRaidAlert(self, guildId, summary):
+        if not self.modChannelWorks:
+            return None
+        self.raidAlerts.append(summary)
+        return 900000000000000000 + len(self.raidAlerts)
+
+    async def updateRaidAlert(self, guildId, messageId, summary):
+        self.raidAlertUpdates.append((messageId, summary))
+
+    async def removeVerifiedRole(self, guildId, userId, auditReason):
+        self.removed.append(userId)
+        if self.members.get(userId):
+            self.members[userId] = False
+            return True
+        return False
 
 
 class FakeOAuth(DiscordOAuth):

@@ -17,7 +17,7 @@ from hollowwarden.web import VerificationSite
 
 from .test_admin import makeInteraction
 from .test_core import baseEnviron, webEnviron
-from .test_flow import NEW_USER, OLD_USER, OTHER_OLD_USER, FakeGateway, FakeOAuth, finishFlow, startFlow
+from .test_flow import NEW_USER, OLD_USER, OTHER_OLD_USER, FakeGateway, FakeOAuth, finishFlow
 
 FRIENDS = 111111111111111111
 GAMING = 777777777777777771

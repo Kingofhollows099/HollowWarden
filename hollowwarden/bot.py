@@ -19,6 +19,7 @@ callback, on_submit, from_custom_id) must keep its snake_case names.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import time
@@ -31,11 +32,12 @@ from .captcha import codesMatch, generateCode, renderCaptcha
 from .config import ServerSettings, Settings
 from .diagnostics import ERROR, OK, WARNING, Finding, checkApplication, checkDatabase, checkOauthCredentials
 from .diagnostics import checkVpnList, checkWebsite, formatReport
+from .raids import RaidSummary
 from .ratelimit import RateLimiter
 from .storage import ServerStorage
 from .oauth import DiscordOAuth
 from .vpnlist import VpnChecker
-from .verification import MemberState, Outcome, Verifier
+from .verification import MemberState, Outcome, Verifier, accountCreatedAt, describeAge
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,13 @@ CAPTCHA_LIFETIME_SECONDS = 300
 CAPTCHA_ATTEMPTS = 3
 MAX_ACTIVE_CAPTCHAS = 1000
 WEB_LINK_LIFETIME_SECONDS = 600
+# A raid alert is edited at most this often while it grows, so a burst of
+# dozens of accounts doesn't turn into dozens of edits against Discord's
+# rate limits.
+RAID_ALERT_EDIT_INTERVAL_SECONDS = 3
+RAID_CONFIRM_SECONDS = 60
+# Longer member lists than this go in an attached text file.
+MAX_RAID_LIST_LENGTH = 3800
 
 # A verified role carrying any of these would let anyone who passes
 # verification take over the server, so the bot refuses to hand it out.
@@ -181,6 +190,96 @@ def buildReviewMessage(
     return {"embed": embed, "view": view}
 
 
+class RaidButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"hollowwarden:raid:(?P<action>approve|deny|list):(?P<raidId>[0-9]{1,12})",
+):
+    """Buttons on a raid alert. The raid ID lives in the custom_id, so they
+    keep working after a restart. The server comes from the interaction, and
+    raid IDs are looked up in that server's own database, so a raid in one
+    server can't be acted on from another."""
+
+    LABELS = {"approve": "✓ Approve all", "deny": "⚠ Deny all", "list": "List members"}
+
+    def __init__(self, action: str, raidId: int, disabled: bool = False) -> None:
+        super().__init__(
+            discord.ui.Button(
+                label=self.LABELS[action],
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"hollowwarden:raid:{action}:{raidId}",
+                disabled=disabled,
+            )
+        )
+        self.action = action
+        self.raidId = raidId
+
+    @classmethod
+    async def from_custom_id(
+        cls, interaction: discord.Interaction, item: discord.ui.Button, match
+    ) -> "RaidButton":
+        return cls(match["action"], int(match["raidId"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.client.handleRaidButton(interaction, self.raidId, self.action)
+
+
+class RaidConfirmView(discord.ui.View):
+    """A private "are you sure?" before acting on everyone in a raid. Deny all
+    can take the Verified role away from people, so one stray click shouldn't
+    be enough."""
+
+    def __init__(self, raidId: int, approve: bool, alertMessage: discord.Message | None) -> None:
+        super().__init__(timeout=RAID_CONFIRM_SECONDS)
+        self.raidId = raidId
+        self.approve = approve
+        self.alertMessage = alertMessage
+        self.confirmButton.label = "✓ Yes, approve all" if approve else "⚠ Yes, deny all"
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.secondary)
+    async def confirmButton(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.stop()
+        await interaction.client.applyRaidDecision(interaction, self.raidId, self.approve, self.alertMessage)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancelButton(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. Nothing was changed.", view=None)
+
+
+def buildRaidAlert(summary: RaidSummary, disabled: bool = False) -> dict[str, object]:
+    embed = discord.Embed(
+        title="⚠  Possible raid",
+        description=(
+            f"**{summary.memberCount}** verification attempts since <t:{summary.startedAt}:R> "
+            f"(raid protection triggers at {summary.threshold} within {summary.windowMinutes} minutes). "
+            "Everyone verifying now is held for review, with this alert instead of a message for each."
+        ),
+        colour=ACCENT_COLOUR,
+    )
+    heldText = str(summary.heldCount)
+    if summary.flaggedCount:
+        heldText += f" ({summary.flaggedCount} also flagged for other reasons)"
+    embed.add_field(name="Held for review", value=heldText, inline=True)
+    if summary.verifiedBeforeCount:
+        embed.add_field(
+            name="Let in before detection",
+            value=f"{summary.verifiedBeforeCount} (Deny all removes their Verified role)",
+            inline=True,
+        )
+    view = discord.ui.View(timeout=None)
+    if summary.decision is None:
+        view.add_item(RaidButton("approve", summary.raidId, disabled=disabled))
+        view.add_item(RaidButton("deny", summary.raidId, disabled=disabled))
+    else:
+        decision = "✓  Approved all" if summary.decision == "approved" else "⚠  Denied all"
+        decidedBy = f" by <@{summary.decidedBy}>" if summary.decidedBy else ""
+        result = f"\n{summary.resultText}" if summary.resultText else ""
+        embed.add_field(name="Decision", value=f"{decision}{decidedBy}{result}"[:1024], inline=False)
+    # The list stays available after a decision, for the record.
+    view.add_item(RaidButton("list", summary.raidId, disabled=disabled))
+    return {"embed": embed, "view": view}
+
+
 class HollowWardenBot(discord.Client):
     def __init__(self, settings: Settings, storage: ServerStorage) -> None:
         intents = discord.Intents.none()
@@ -205,10 +304,13 @@ class HollowWardenBot(discord.Client):
         self.lastModChannelError: str | None = None
         # Set by the entry point when VPN detection is on.
         self.vpnChecker: VpnChecker | None = None
+        # The newest content for each raid alert waiting to be edited in,
+        # keyed by (guild ID, message ID); see updateRaidAlert.
+        self._pendingRaidEdits: dict[tuple[int, int], RaidSummary] = {}
 
     async def setup_hook(self) -> None:
         self.add_view(VerifyPanelView())
-        self.add_dynamic_items(ReviewButton)
+        self.add_dynamic_items(ReviewButton, RaidButton)
 
         # Who may use these is decided by each server's admin_role_ids,
         # checked in code on every use (see isBotAdmin). They're deliberately
@@ -436,6 +538,8 @@ class HollowWardenBot(discord.Client):
             findings.append(Finding(WARNING, f"Couldn't read the app's settings from Discord (HTTP {error.status})."))
         findings.append(await checkDatabase(self.storage.forGuild(server.guildId)))
         findings.append(await self.checkReviewPost(server))
+        if server.raidThreshold:
+            findings.append(await self.checkRaidAlertPost(server))
         if server.verifyMethod == "web" and self.settings.web is not None:
             if self.oauth is not None:
                 findings.append(await checkOauthCredentials(self.oauth))
@@ -474,11 +578,42 @@ class HollowWardenBot(discord.Client):
             return Finding(WARNING, "A test review posted fine, but couldn't be deleted. Delete it from the mod channel.")
         return Finding(OK, "A test review message posted to the mod channel and was deleted.")
 
+    async def checkRaidAlertPost(self, server: ServerSettings) -> Finding:
+        """Post a sample raid alert (buttons disabled) and delete it, for the
+        same reason as checkReviewPost: Discord can reject a message for its
+        content, and during a raid that would leave everyone unable to verify."""
+        sample = RaidSummary(
+            raidId=0,
+            startedAt=int(time.time()),
+            memberCount=server.raidThreshold,
+            heldCount=1,
+            verifiedBeforeCount=server.raidThreshold - 1,
+            flaggedCount=0,
+            threshold=server.raidThreshold,
+            windowMinutes=server.raidWindowMinutes,
+        )
+        message = await self.sendToModChannel(server.guildId, **buildRaidAlert(sample, disabled=True))
+        if message is None:
+            return Finding(
+                ERROR,
+                f"Raid alerts can't be posted ({self.lastModChannelError}). During a raid, members would see "
+                "\"Verification unavailable\" until this is fixed.",
+            )
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            return Finding(WARNING, "A test raid alert posted fine, but couldn't be deleted. Delete it from the mod channel.")
+        return Finding(OK, "A test raid alert posted to the mod channel and was deleted.")
+
     def describeSettings(self, server: ServerSettings) -> str:
         parts = [f"Server: **{discord.utils.escape_markdown(server.name)}**"]
         parts.append(f"Method: **{server.verifyMethod}**")
         parts.append(f"Flagged members: **{server.flaggedAction}**")
         parts.append(f"Minimum account age: **{server.minAccountAgeDays} days**")
+        if server.raidThreshold:
+            parts.append(f"Raid protection: **{server.raidThreshold} in {server.raidWindowMinutes} min**")
+        else:
+            parts.append("Raid protection: **off**")
         if server.verifyMethod == "web":
             parts.append(f"VPN flagging: **{'on' if server.flagVpn else 'off'}**")
             parts.append(f"IP hashes kept: **{server.ipRetentionDays} days**")
@@ -549,6 +684,48 @@ class HollowWardenBot(discord.Client):
 
     async def postReview(self, guildId: int, userId: int, reasons: list[str], needsDecision: bool) -> bool:
         return await self.sendToModChannel(guildId, **buildReviewMessage(userId, reasons, needsDecision)) is not None
+
+    async def postRaidAlert(self, guildId: int, summary: RaidSummary) -> int | None:
+        message = await self.sendToModChannel(guildId, **buildRaidAlert(summary))
+        return message.id if message is not None else None
+
+    async def updateRaidAlert(self, guildId: int, messageId: int, summary: RaidSummary) -> None:
+        """Bring a raid alert up to date, at most once per interval. Only the
+        newest content is kept, so however many accounts arrive in between,
+        it's one edit."""
+        key = (guildId, messageId)
+        alreadyScheduled = key in self._pendingRaidEdits
+        self._pendingRaidEdits[key] = summary
+        if not alreadyScheduled:
+            asyncio.get_running_loop().create_task(self._editRaidAlertSoon(key))
+
+    async def _editRaidAlertSoon(self, key: tuple[int, int]) -> None:
+        await asyncio.sleep(RAID_ALERT_EDIT_INTERVAL_SECONDS)
+        summary = self._pendingRaidEdits.pop(key, None)
+        if summary is not None:
+            await self.editRaidAlert(key[0], key[1], summary)
+
+    async def editRaidAlert(self, guildId: int, messageId: int, summary: RaidSummary) -> None:
+        server = self.settings.servers[guildId]
+        channel = await self.getModChannel(server)
+        if channel is None:
+            log.error("can't update raid alert %s in %s: mod channel unavailable", messageId, server.name)
+            return
+        try:
+            await channel.get_partial_message(messageId).edit(**buildRaidAlert(summary))
+        except discord.HTTPException as error:
+            log.error("can't update raid alert %s in %s (HTTP %s)", messageId, server.name, error.status)
+
+    async def removeVerifiedRole(self, guildId: int, userId: int, auditReason: str) -> bool:
+        role = self.getVerifiedRole(self.settings.servers[guildId])
+        try:
+            member = await role.guild.fetch_member(userId)
+        except discord.NotFound:
+            return False
+        if member.get_role(role.id) is None:
+            return False
+        await member.remove_roles(role, reason=auditReason)
+        return True
 
     async def sendToModChannel(self, guildId: int, **messageFields) -> discord.Message | None:
         """Post to a server's mod channel. Returns None and logs the cause
@@ -777,6 +954,116 @@ class HollowWardenBot(discord.Client):
             await interaction.followup.send(f"✓  {member.mention} is already verified.", ephemeral=True)
         else:
             await interaction.followup.send("⚠  That person isn't in the server.", ephemeral=True)
+
+    async def handleRaidButton(self, interaction: discord.Interaction, raidId: int, action: str) -> None:
+        # Checked on every click, like the review buttons.
+        if not self.isBotAdmin(interaction):
+            await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
+            return
+        server = self.serverFor(interaction)
+        assert server is not None
+        if action == "list":
+            await self.handleRaidList(interaction, server, raidId)
+            return
+
+        summary = await self._raidSummaryOrNone(server, raidId)
+        if summary is None or summary.decision is not None:
+            await interaction.response.send_message("⚠  Already handled.", ephemeral=True)
+            return
+        approve = action == "approve"
+        if approve:
+            question = f"Verify all **{summary.heldCount}** held members of this raid?"
+        else:
+            question = f"Keep all **{summary.heldCount}** held members of this raid out?"
+            if summary.verifiedBeforeCount:
+                question += (
+                    f" This also removes the Verified role from the **{summary.verifiedBeforeCount}** "
+                    "let in before the raid was detected."
+                )
+        await interaction.response.send_message(
+            question, view=RaidConfirmView(raidId, approve, interaction.message), ephemeral=True
+        )
+
+    async def _raidSummaryOrNone(self, server: ServerSettings, raidId: int) -> RaidSummary | None:
+        try:
+            return await self.verifier.raidSummary(server, raidId)
+        except ValueError:
+            return None
+
+    async def applyRaidDecision(
+        self, interaction: discord.Interaction, raidId: int, approve: bool, alertMessage: discord.Message | None
+    ) -> None:
+        # Checked again: the confirmation could be clicked after the
+        # person's admin role was taken away.
+        if not self.isBotAdmin(interaction):
+            await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
+            return
+        server = self.serverFor(interaction)
+        assert server is not None
+        await interaction.response.edit_message(content="Working on it…", view=None)
+        try:
+            resolution = await self.verifier.resolveRaid(server.guildId, raidId, approve, interaction.user.id)
+        except Exception:
+            log.exception("couldn't apply the raid decision for raid %s in %s", raidId, server.name)
+            await interaction.edit_original_response(content="⚠  Couldn't apply that. Check the bot's logs.")
+            return
+        if resolution is None:
+            await interaction.edit_original_response(content="⚠  Already handled.")
+            return
+
+        resultText = resolution.describe(approve)
+        summary = await self.verifier.raidSummary(server, raidId, resultText=resultText)
+        raid = await self.storage.forGuild(server.guildId).getRaid(raidId)
+        messageId = alertMessage.id if alertMessage is not None else (raid.messageId if raid else None)
+        if messageId is not None:
+            # Any queued edit would show the raid as undecided again.
+            self._pendingRaidEdits.pop((server.guildId, messageId), None)
+            await self.editRaidAlert(server.guildId, messageId, summary)
+        decision = "✓  Raid approved" if approve else "⚠  Raid denied"
+        await self.postModLog(server.guildId, f"{decision} by <@{interaction.user.id}>: {resultText}")
+        await interaction.edit_original_response(content=f"{decision}: {resultText}")
+
+    async def handleRaidList(self, interaction: discord.Interaction, server: ServerSettings, raidId: int) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        store = self.storage.forGuild(server.guildId)
+        members = await store.listRaidMembers(raidId) if await store.getRaid(raidId) else []
+        if not members:
+            await interaction.followup.send("⚠  No members recorded for this raid.", ephemeral=True)
+            return
+
+        now = time.time()
+        entries = []
+        for member in members:
+            if member.verifiedBefore:
+                status = "let in before detection"
+            elif await self.storage.hasPendingReview(server.guildId, member.userId):
+                status = "held"
+            else:
+                status = "handled"
+            entries.append((member, status, describeAge(now - accountCreatedAt(member.userId))))
+
+        title = f"Raid members ({len(members)})"
+        lines = []
+        for member, status, age in entries:
+            lines.append(f"<@{member.userId}> (`{member.userId}`) · account {age} old · {status}")
+            lines.extend(f"  • {reason}" for reason in member.reasons)
+        listText = "\n".join(lines)
+        if len(listText) <= MAX_RAID_LIST_LENGTH:
+            embed = discord.Embed(title=title, description=listText, colour=ACCENT_COLOUR)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Too long for one message, so it goes in a file, which only this
+        # admin sees (the reply is private). Mentions don't work in a text
+        # file, so it lists IDs, which Discord's member search accepts.
+        plainLines = []
+        for member, status, age in entries:
+            plainLines.append(f"{member.userId}  account {age} old  {status}")
+            plainLines.extend(f"    - {reason}" for reason in member.reasons)
+        listFile = discord.File(io.BytesIO("\n".join(plainLines).encode("utf-8")), filename=f"raid-{raidId}-members.txt")
+        await interaction.followup.send(
+            f"{title}: the list is long, so it's in the attached file.", file=listFile, ephemeral=True
+        )
 
     async def handleReviewDecision(self, interaction: discord.Interaction, userId: int, approve: bool) -> None:
         # Checked on every click, not just by channel visibility: if the mod
