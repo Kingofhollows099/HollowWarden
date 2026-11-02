@@ -80,7 +80,7 @@ async def checkDatabase(storage: Storage) -> Finding:
     try:
         # A real write, but a harmless one: it only deletes verification
         # links and login states that have already expired.
-        await storage.purgeExpired(ipRetentionSeconds=None)
+        await storage.purgeExpired()
     except Exception as error:
         return Finding(ERROR, f"The database couldn't be written to ({type(error).__name__}). Check the data volume.")
     return Finding(OK, "Database is readable and writable.")

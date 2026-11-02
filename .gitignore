@@ -16,3 +16,6 @@ __pycache__/
 
 # Your local Docker Compose changes (see docker-compose.override.example.yml)
 docker-compose.override.yml
+
+# Your servers' settings: they're yours, and a pull should never touch them.
+config/servers/*/

@@ -7,8 +7,11 @@ Least privilege throughout:
 - Server permissions needed: Manage Roles, plus View Channel / Send Messages /
   Embed Links / Attach Files where it posts. Nothing else, and never
   Administrator.
-- It leaves any server that isn't yours, so a leaked invite link can't put
-  it to work elsewhere.
+- It leaves any server that isn't in its configuration, so a leaked invite
+  link can't put it to work elsewhere.
+- Every server has its own settings, roles and data. Each interaction is
+  handled using the settings of the server it came from, and nothing from
+  one server is ever shown in another.
 
 Method names that discord.py calls by convention (setup_hook, on_ready,
 callback, on_submit, from_custom_id) must keep its snake_case names.
@@ -25,11 +28,11 @@ import discord
 from discord import app_commands
 
 from .captcha import codesMatch, generateCode, renderCaptcha
-from .config import Settings
+from .config import ServerSettings, Settings
 from .diagnostics import ERROR, OK, WARNING, Finding, checkApplication, checkDatabase, checkOauthCredentials
 from .diagnostics import checkVpnList, checkWebsite, formatReport
 from .ratelimit import RateLimiter
-from .storage import Storage
+from .storage import ServerStorage
 from .oauth import DiscordOAuth
 from .vpnlist import VpnChecker
 from .verification import MemberState, Outcome, Verifier
@@ -179,7 +182,7 @@ def buildReviewMessage(
 
 
 class HollowWardenBot(discord.Client):
-    def __init__(self, settings: Settings, storage: Storage) -> None:
+    def __init__(self, settings: Settings, storage: ServerStorage) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
         super().__init__(
@@ -193,7 +196,9 @@ class HollowWardenBot(discord.Client):
         self.verifier = Verifier(settings, storage, self)
         self.tree = app_commands.CommandTree(self)
         self.clickLimiter = RateLimiter(maxEvents=5, windowSeconds=600)
-        self.captchaChallenges: dict[int, CaptchaChallenge] = {}
+        # Keyed by (guild ID, user ID): someone in two servers gets a
+        # separate challenge in each.
+        self.captchaChallenges: dict[tuple[int, int], CaptchaChallenge] = {}
         # Set by the entry point in web mode, so /test-config can check the
         # OAuth credentials.
         self.oauth: DiscordOAuth | None = None
@@ -205,12 +210,13 @@ class HollowWardenBot(discord.Client):
         self.add_view(VerifyPanelView())
         self.add_dynamic_items(ReviewButton)
 
-        # Who may use these is decided by ADMIN_ROLE_IDS, checked in code on
-        # every use (see isBotAdmin). They're deliberately not hidden with
-        # Discord's default_permissions: that would key visibility to a
-        # Discord permission rather than your chosen roles, and the two would
-        # drift apart. To hide them from regular members anyway, use Server
-        # Settings → Integrations; that only affects visibility, not access.
+        # Who may use these is decided by each server's admin_role_ids,
+        # checked in code on every use (see isBotAdmin). They're deliberately
+        # not hidden with Discord's default_permissions: that would key
+        # visibility to a Discord permission rather than your chosen roles,
+        # and the two would drift apart. To hide them from regular members
+        # anyway, use Server Settings → Integrations; that only affects
+        # visibility, not access.
         @app_commands.command(name="verification-panel", description="Post the verification button in this channel")
         @app_commands.guild_only()
         async def verificationPanelCommand(interaction: discord.Interaction) -> None:
@@ -237,24 +243,33 @@ class HollowWardenBot(discord.Client):
         async def testConfigCommand(interaction: discord.Interaction) -> None:
             await self.handleTestConfig(interaction)
 
-        homeGuild = discord.Object(id=self.settings.guildId)
-        # Registered only in your server, never globally.
+        # Registered only in your configured servers, never globally.
+        configuredGuilds = [discord.Object(id=guildId) for guildId in self.settings.servers]
         for command in (verificationPanelCommand, verifyMemberCommand, verifyMemberMenu, testConfigCommand):
-            self.tree.add_command(command, guild=homeGuild)
-        try:
-            await self.syncCommands()
-        except discord.Forbidden:
-            # Raised as one readable error rather than left as a traceback,
-            # so each pass of Docker's restart loop shows the actual cause.
-            raise StartupError(self.describeSyncDenied()) from None
+            self.tree.add_command(command, guilds=configuredGuilds)
 
-    async def syncCommands(self) -> None:
-        await self.tree.sync(guild=discord.Object(id=self.settings.guildId))
-        log.info("slash commands registered in GUILD_ID %s", self.settings.guildId)
+        deniedGuildIds = []
+        for guildId in self.settings.servers:
+            try:
+                await self.syncCommands(guildId)
+            except discord.Forbidden:
+                deniedGuildIds.append(guildId)
+        if len(deniedGuildIds) == len(self.settings.servers):
+            # Nothing would work anywhere. Stop with one readable error rather
+            # than a traceback, so each pass of Docker's restart loop shows it.
+            raise StartupError(self.describeSyncDenied(deniedGuildIds[0]))
+        for guildId in deniedGuildIds:
+            # Other servers still work, so keep running and say what's wrong.
+            log.error("%s", self.describeSyncDenied(guildId))
 
-    def describeSyncDenied(self) -> str:
+    async def syncCommands(self, guildId: int) -> None:
+        await self.tree.sync(guild=discord.Object(id=guildId))
+        log.info("slash commands registered in %s (%s)", self.settings.servers[guildId].name, guildId)
+
+    def describeSyncDenied(self, guildId: int) -> str:
+        server = self.settings.servers[guildId]
         return (
-            f"Discord denied access to GUILD_ID {self.settings.guildId}: the bot isn't in that server, "
+            f"Discord denied access to {server.name} (guild_id {guildId}): the bot isn't in that server, "
             "or was invited without the applications.commands scope. Re-invite it using "
             "OAuth2 → URL Generator with the bot and applications.commands scopes."
         )
@@ -262,14 +277,16 @@ class HollowWardenBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("logged in as %s (%s)", self.user, self.user.id if self.user else "?")
         for guild in list(self.guilds):
-            if guild.id != self.settings.guildId:
-                log.warning("leaving unexpected server %s (%s)", guild.name, guild.id)
+            if self.settings.server(guild.id) is None:
+                log.warning("leaving unconfigured server %s (%s)", guild.name, guild.id)
                 await guild.leave()
-        self.checkSetup()
+        for server in self.settings.servers.values():
+            self.checkSetup(server)
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        if guild.id != self.settings.guildId:
-            log.warning("added to unexpected server %s (%s); leaving", guild.name, guild.id)
+        server = self.settings.server(guild.id)
+        if server is None:
+            log.warning("added to unconfigured server %s (%s); leaving", guild.name, guild.id)
             await guild.leave()
             return
         # Removing the bot from a server deletes its slash commands there, and
@@ -277,31 +294,31 @@ class HollowWardenBot(discord.Client):
         # only at startup, so register them again now instead of requiring a
         # restart. The bot also gets a brand-new role on rejoin, which loses
         # its old position and channel permissions, so re-check the setup too.
-        log.info("re-added to GUILD_ID %s; registering commands again", guild.id)
+        log.info("re-added to %s (%s); registering commands again", server.name, guild.id)
         try:
-            await self.syncCommands()
+            await self.syncCommands(guild.id)
         except discord.Forbidden:
             # Unlike at startup, don't stop a running bot over this: its
             # buttons and the web flow still work without slash commands.
-            log.error("%s", self.describeSyncDenied())
-        self.checkSetup()
+            log.error("%s", self.describeSyncDenied(guild.id))
+        self.checkSetup(server)
 
-    def checkSetup(self) -> None:
+    def checkSetup(self, server: ServerSettings) -> None:
         """Log clear warnings for common setup mistakes at startup, rather
         than having the first person to verify discover them. /test-config
         runs the same checks and more."""
-        for finding in self.collectSetupFindings():
+        for finding in self.collectSetupFindings(server):
             if finding.level == ERROR:
-                log.error("%s", finding.text)
+                log.error("%s: %s", server.name, finding.text)
             elif finding.level == WARNING:
-                log.warning("%s", finding.text)
+                log.warning("%s: %s", server.name, finding.text)
 
-    def collectSetupFindings(self) -> list[Finding]:
-        """Check the server's roles and channels, using only what's cached
+    def collectSetupFindings(self, server: ServerSettings) -> list[Finding]:
+        """Check a server's roles and channels, using only what's cached
         locally (no API calls), so it's safe to run at startup."""
-        guild = self.get_guild(self.settings.guildId)
+        guild = self.get_guild(server.guildId)
         if guild is None:
-            return [Finding(ERROR, f"The bot is not in GUILD_ID {self.settings.guildId}; invite it first.")]
+            return [Finding(ERROR, f"The bot is not in guild_id {server.guildId}; invite it first.")]
         findings = []
 
         if guild.me.guild_permissions.administrator:
@@ -312,30 +329,34 @@ class HollowWardenBot(discord.Client):
             findings.append(Finding(OK, "The bot doesn't have Administrator."))
 
         try:
-            verifiedRole = self.getVerifiedRole()
+            verifiedRole = self.getVerifiedRole(server)
         except UnsafeRoleError as error:
             verifiedRole = None
             findings.append(Finding(ERROR, f"Verified role: {error}."))
         else:
             findings.append(Finding(OK, f"The bot can safely give out {verifiedRole.mention}."))
 
-        missingRoleIds = [roleId for roleId in self.settings.adminRoleIds if guild.get_role(roleId) is None]
+        missingRoleIds = [roleId for roleId in server.adminRoleIds if guild.get_role(roleId) is None]
         if missingRoleIds:
             findings.append(
-                Finding(ERROR, f"ADMIN_ROLE_IDS contains roles that don't exist: {', '.join(map(str, missingRoleIds))}.")
+                Finding(ERROR, f"admin_role_ids contains roles that don't exist: {', '.join(map(str, missingRoleIds))}.")
             )
         else:
-            adminMentions = ", ".join(f"<@&{roleId}>" for roleId in sorted(self.settings.adminRoleIds))
+            adminMentions = ", ".join(f"<@&{roleId}>" for roleId in sorted(server.adminRoleIds))
             findings.append(Finding(OK, f"Bot admin roles: {adminMentions}."))
 
-        findings.extend(self.collectModChannelFindings(guild, verifiedRole))
-        findings.extend(self.collectVisibilityFindings(guild))
+        findings.extend(self.collectModChannelFindings(server, guild, verifiedRole))
+        findings.extend(self.collectVisibilityFindings(server, guild))
         return findings
 
-    def collectModChannelFindings(self, guild: discord.Guild, verifiedRole: discord.Role | None) -> list[Finding]:
-        modChannel = guild.get_channel(self.settings.modChannelId)
+    def collectModChannelFindings(
+        self, server: ServerSettings, guild: discord.Guild, verifiedRole: discord.Role | None
+    ) -> list[Finding]:
+        modChannel = guild.get_channel(server.modChannelId)
         if modChannel is None:
-            return [Finding(ERROR, f"MOD_CHANNEL_ID {self.settings.modChannelId} is not a channel in this server.")]
+            # Also catches a mod channel ID that belongs to a different
+            # server: guild.get_channel only finds this server's channels.
+            return [Finding(ERROR, f"mod_channel_id {server.modChannelId} is not a channel in this server.")]
         findings = []
 
         # Discord tells bots about every channel, including ones they can't
@@ -347,8 +368,8 @@ class HollowWardenBot(discord.Client):
             findings.append(
                 Finding(
                     ERROR,
-                    f"HollowWarden is missing {', '.join(missingPermissions)} in MOD_CHANNEL_ID "
-                    f"{self.settings.modChannelId}; allow them for its role in that channel's permissions, or "
+                    f"HollowWarden is missing {', '.join(missingPermissions)} in mod_channel_id "
+                    f"{server.modChannelId}; allow them for its role in that channel's permissions, or "
                     "verification messages and reviews can't be posted.",
                 )
             )
@@ -377,12 +398,12 @@ class HollowWardenBot(discord.Client):
             findings.append(Finding(OK, "The mod channel is hidden from regular members."))
         return findings
 
-    def collectVisibilityFindings(self, guild: discord.Guild) -> list[Finding]:
+    def collectVisibilityFindings(self, server: ServerSettings, guild: discord.Guild) -> list[Finding]:
         """Verification only protects channels that unverified members can't see."""
         visibleChannels = [
             channel
             for channel in guild.text_channels
-            if channel.id != self.settings.modChannelId and channel.permissions_for(guild.default_role).view_channel
+            if channel.id != server.modChannelId and channel.permissions_for(guild.default_role).view_channel
         ]
         if not visibleChannels:
             return [
@@ -405,7 +426,7 @@ class HollowWardenBot(discord.Client):
             ]
         return [Finding(OK, f"Unverified members can only see: {names}.")]
 
-    async def collectLiveFindings(self) -> list[Finding]:
+    async def collectLiveFindings(self, server: ServerSettings) -> list[Finding]:
         """Checks that call out to Discord or the website. Only run on
         request, since they make network calls."""
         findings = []
@@ -413,16 +434,16 @@ class HollowWardenBot(discord.Client):
             findings.extend(checkApplication(await self.application_info(), self.settings))
         except discord.HTTPException as error:
             findings.append(Finding(WARNING, f"Couldn't read the app's settings from Discord (HTTP {error.status})."))
-        findings.append(await checkDatabase(self.storage))
-        findings.append(await self.checkReviewPost())
-        if self.settings.web is not None:
+        findings.append(await checkDatabase(self.storage.forGuild(server.guildId)))
+        findings.append(await self.checkReviewPost(server))
+        if server.verifyMethod == "web" and self.settings.web is not None:
             if self.oauth is not None:
                 findings.append(await checkOauthCredentials(self.oauth))
             findings.extend(await checkWebsite(self.settings.web))
-            findings.append(checkVpnList(self.vpnChecker))
+            findings.append(checkVpnList(self.vpnChecker if server.flagVpn else None))
         return findings
 
-    async def checkReviewPost(self) -> Finding:
+    async def checkReviewPost(self, server: ServerSettings) -> Finding:
         """Post a sample review and delete it straight away.
 
         Checking permissions alone isn't enough: Discord can still reject a
@@ -433,14 +454,14 @@ class HollowWardenBot(discord.Client):
         """
         # Any real Discord ID fits the button format. The bot's own is used
         # when logged in (always, in practice), the server's otherwise.
-        sampleUserId = self.user.id if self.user is not None else self.settings.guildId
+        sampleUserId = self.user.id if self.user is not None else server.guildId
         sampleMessage = buildReviewMessage(
             sampleUserId,
             ["This is a test from /test-config. It will be deleted straight away."],
             needsDecision=True,
             disabled=True,
         )
-        message = await self.sendToModChannel(**sampleMessage)
+        message = await self.sendToModChannel(server.guildId, **sampleMessage)
         if message is None:
             return Finding(
                 ERROR,
@@ -453,20 +474,23 @@ class HollowWardenBot(discord.Client):
             return Finding(WARNING, "A test review posted fine, but couldn't be deleted. Delete it from the mod channel.")
         return Finding(OK, "A test review message posted to the mod channel and was deleted.")
 
-    def describeSettings(self) -> str:
-        parts = [f"Method: **{self.settings.verifyMethod}**", f"Flagged members: **{self.settings.flaggedAction}**"]
-        parts.append(f"Minimum account age: **{self.settings.minAccountAgeDays} days**")
-        if self.settings.web is not None:
-            parts.append(f"IP hashes kept: **{self.settings.web.ipRetentionDays} days**")
+    def describeSettings(self, server: ServerSettings) -> str:
+        parts = [f"Server: **{discord.utils.escape_markdown(server.name)}**"]
+        parts.append(f"Method: **{server.verifyMethod}**")
+        parts.append(f"Flagged members: **{server.flaggedAction}**")
+        parts.append(f"Minimum account age: **{server.minAccountAgeDays} days**")
+        if server.verifyMethod == "web":
+            parts.append(f"VPN flagging: **{'on' if server.flagVpn else 'off'}**")
+            parts.append(f"IP hashes kept: **{server.ipRetentionDays} days**")
         return " · ".join(parts)
 
-    def getVerifiedRole(self) -> discord.Role:
-        guild = self.get_guild(self.settings.guildId)
+    def getVerifiedRole(self, server: ServerSettings) -> discord.Role:
+        guild = self.get_guild(server.guildId)
         if guild is None:
-            raise UnsafeRoleError("the bot is not in the configured server")
-        role = guild.get_role(self.settings.verifiedRoleId)
+            raise UnsafeRoleError("the bot is not in this server")
+        role = guild.get_role(server.verifiedRoleId)
         if role is None:
-            raise UnsafeRoleError(f"VERIFIED_ROLE_ID {self.settings.verifiedRoleId} does not exist")
+            raise UnsafeRoleError(f"verified_role_id {server.verifiedRoleId} does not exist in this server")
         if role.permissions.value & DANGEROUS_PERMISSIONS.value:
             raise UnsafeRoleError(
                 f"refusing to grant role '{role.name}': it has moderator/admin permissions. "
@@ -480,84 +504,96 @@ class HollowWardenBot(discord.Client):
             raise UnsafeRoleError("the bot needs the Manage Roles permission")
         return role
 
-    def isHomeGuild(self, interaction: discord.Interaction) -> bool:
-        return interaction.guild_id == self.settings.guildId
+    def serverFor(self, interaction: discord.Interaction) -> ServerSettings | None:
+        """The settings of the server an interaction came from, or None if
+        that server isn't configured (or it's a DM)."""
+        return self.settings.server(interaction.guild_id)
 
     def isBotAdmin(self, interaction: discord.Interaction) -> bool:
-        """True if this person holds one of the ADMIN_ROLE_IDS roles.
+        """True if this person holds one of this server's admin roles.
 
         Discord's own permissions (even Administrator) don't count: only the
         roles you chose do. The server owner is the one exception, since they
         can give themselves any role anyway, and leaving them out would only
-        risk locking you out of your own bot.
+        risk locking you out of your own bot. Being an admin in one server
+        grants nothing in another.
         """
-        if not self.isHomeGuild(interaction) or not isinstance(interaction.user, discord.Member):
+        server = self.serverFor(interaction)
+        if server is None or not isinstance(interaction.user, discord.Member):
             return False
         if interaction.guild is not None and interaction.user.id == interaction.guild.owner_id:
             return True
-        return any(role.id in self.settings.adminRoleIds for role in interaction.user.roles)
+        return any(role.id in server.adminRoleIds for role in interaction.user.roles)
 
     # DiscordGateway implementation (used by Verifier)
 
-    async def getMemberState(self, userId: int) -> MemberState:
-        guild = self.get_guild(self.settings.guildId)
+    async def getMemberState(self, guildId: int, userId: int) -> MemberState:
+        server = self.settings.servers[guildId]
+        guild = self.get_guild(guildId)
         if guild is None:
-            raise RuntimeError("the bot is not in the configured server")
+            raise RuntimeError(f"the bot is not in {server.name}")
         try:
             member = await guild.fetch_member(userId)
         except discord.NotFound:
             return MemberState(isMember=False, hasVerifiedRole=False)
-        hasRole = any(role.id == self.settings.verifiedRoleId for role in member.roles)
+        hasRole = any(role.id == server.verifiedRoleId for role in member.roles)
         return MemberState(isMember=True, hasVerifiedRole=hasRole)
 
-    async def grantVerifiedRole(self, userId: int, auditReason: str | None = None) -> None:
-        role = self.getVerifiedRole()
-        guild = role.guild
-        member = await guild.fetch_member(userId)
+    async def grantVerifiedRole(self, guildId: int, userId: int, auditReason: str | None = None) -> None:
+        role = self.getVerifiedRole(self.settings.servers[guildId])
+        member = await role.guild.fetch_member(userId)
         await member.add_roles(role, reason=auditReason or "Passed HollowWarden verification")
 
-    async def postModLog(self, message: str) -> None:
-        await self.sendToModChannel(content=message)
+    async def postModLog(self, guildId: int, message: str) -> None:
+        await self.sendToModChannel(guildId, content=message)
 
-    async def postReview(self, userId: int, reasons: list[str], needsDecision: bool) -> bool:
-        return await self.sendToModChannel(**buildReviewMessage(userId, reasons, needsDecision)) is not None
+    async def postReview(self, guildId: int, userId: int, reasons: list[str], needsDecision: bool) -> bool:
+        return await self.sendToModChannel(guildId, **buildReviewMessage(userId, reasons, needsDecision)) is not None
 
-    async def sendToModChannel(self, **messageFields) -> discord.Message | None:
-        """Post to the mod channel. Returns None and logs the cause instead
-        of raising, so callers decide whether a failed post matters. The
-        cause is also kept in lastModChannelError for /test-config."""
+    async def sendToModChannel(self, guildId: int, **messageFields) -> discord.Message | None:
+        """Post to a server's mod channel. Returns None and logs the cause
+        instead of raising, so callers decide whether a failed post matters.
+        The cause is also kept in lastModChannelError for /test-config."""
+        server = self.settings.servers[guildId]
         self.lastModChannelError = None
-        channel = await self.getModChannel()
+        channel = await self.getModChannel(server)
         if channel is None:
-            self.lastModChannelError = f"MOD_CHANNEL_ID {self.settings.modChannelId} isn't a text channel HollowWarden can reach"
+            self.lastModChannelError = (
+                f"mod_channel_id {server.modChannelId} isn't a text channel in {server.name} that HollowWarden can reach"
+            )
             log.error("%s", self.lastModChannelError)
             return None
         try:
             return await channel.send(**messageFields)
         except discord.Forbidden:
             self.lastModChannelError = (
-                f"can't post in MOD_CHANNEL_ID {self.settings.modChannelId}: give HollowWarden View Channel, "
-                "Send Messages and Embed Links there"
+                f"can't post in mod_channel_id {server.modChannelId} ({server.name}): give HollowWarden "
+                "View Channel, Send Messages and Embed Links there"
             )
         except discord.HTTPException as error:
             # Discord's own explanation (such as "Invalid emoji") is the part
             # that says what to fix. It describes our message, not a member.
             detail = " ".join(str(error.text).split())[:300] or "no details given"
             self.lastModChannelError = (
-                f"Discord rejected a post to MOD_CHANNEL_ID {self.settings.modChannelId} "
+                f"Discord rejected a post to mod_channel_id {server.modChannelId} ({server.name}) "
                 f"(HTTP {error.status}, code {error.code}: {detail})"
             )
         log.error("%s", self.lastModChannelError)
         return None
 
-    async def getModChannel(self) -> discord.abc.Messageable | None:
-        channel = self.get_channel(self.settings.modChannelId)
+    async def getModChannel(self, server: ServerSettings) -> discord.abc.Messageable | None:
+        channel = self.get_channel(server.modChannelId)
         if channel is None:
             try:
-                channel = await self.fetch_channel(self.settings.modChannelId)
+                channel = await self.fetch_channel(server.modChannelId)
             except discord.HTTPException:
                 return None
         if not isinstance(channel, discord.abc.Messageable):
+            return None
+        # A channel belonging to another server would show this server's
+        # reviews (including who shares a network) to strangers. Refuse it.
+        if getattr(getattr(channel, "guild", None), "id", None) != server.guildId:
+            log.error("mod_channel_id %s isn't in %s; refusing to post there", server.modChannelId, server.name)
             return None
         return channel
 
@@ -587,30 +623,31 @@ class HollowWardenBot(discord.Client):
         await interaction.response.send_message("✓  Verification panel posted.", ephemeral=True)
 
     async def handleVerifyClick(self, interaction: discord.Interaction) -> None:
-        if not self.isHomeGuild(interaction):
+        server = self.serverFor(interaction)
+        if server is None:
             return
         userId = interaction.user.id
         member = interaction.user
-        if isinstance(member, discord.Member) and member.get_role(self.settings.verifiedRoleId) is not None:
+        if isinstance(member, discord.Member) and member.get_role(server.verifiedRoleId) is not None:
             await interaction.response.send_message(OUTCOME_MESSAGES[Outcome.ALREADY_VERIFIED], ephemeral=True)
             return
-        if not self.clickLimiter.allow(userId):
+        if not self.clickLimiter.allow((server.guildId, userId)):
             await interaction.response.send_message(
                 "⚠  Too many attempts. Wait a few minutes and try again.", ephemeral=True
             )
             return
-        if await self.storage.hasPendingReview(userId):
+        if await self.storage.hasPendingReview(server.guildId, userId):
             await interaction.response.send_message(OUTCOME_MESSAGES[Outcome.PENDING_REVIEW], ephemeral=True)
             return
 
-        if self.settings.verifyMethod == "web":
-            await self.sendWebLink(interaction)
+        if server.verifyMethod == "web":
+            await self.sendWebLink(interaction, server)
         else:
-            await self.sendCaptcha(interaction)
+            await self.sendCaptcha(interaction, server)
 
-    async def sendWebLink(self, interaction: discord.Interaction) -> None:
+    async def sendWebLink(self, interaction: discord.Interaction, server: ServerSettings) -> None:
         assert self.settings.web is not None
-        token = await self.storage.createVerifyToken(interaction.user.id, WEB_LINK_LIFETIME_SECONDS)
+        token = await self.storage.createVerifyToken(server.guildId, interaction.user.id, WEB_LINK_LIFETIME_SECONDS)
         view = discord.ui.View()
         view.add_item(
             discord.ui.Button(label="Open verification page", url=f"{self.settings.web.publicBaseUrl}/verify?t={token}")
@@ -623,7 +660,7 @@ class HollowWardenBot(discord.Client):
             ephemeral=True,
         )
 
-    async def sendCaptcha(self, interaction: discord.Interaction) -> None:
+    async def sendCaptcha(self, interaction: discord.Interaction, server: ServerSettings) -> None:
         now = time.monotonic()
         self.pruneCaptchas(now)
         if len(self.captchaChallenges) >= MAX_ACTIVE_CAPTCHAS:
@@ -631,7 +668,7 @@ class HollowWardenBot(discord.Client):
             return
 
         code = generateCode()
-        self.captchaChallenges[interaction.user.id] = CaptchaChallenge(
+        self.captchaChallenges[(server.guildId, interaction.user.id)] = CaptchaChallenge(
             code=code, expiresAt=now + CAPTCHA_LIFETIME_SECONDS, attemptsLeft=CAPTCHA_ATTEMPTS
         )
         imageFile = discord.File(io.BytesIO(renderCaptcha(code)), filename="captcha.png")
@@ -645,17 +682,19 @@ class HollowWardenBot(discord.Client):
         await interaction.response.send_message(embed=embed, file=imageFile, view=CaptchaView(), ephemeral=True)
 
     def pruneCaptchas(self, now: float) -> None:
-        expiredUserIds = [userId for userId, challenge in self.captchaChallenges.items() if challenge.expiresAt <= now]
-        for userId in expiredUserIds:
-            del self.captchaChallenges[userId]
+        expiredKeys = [key for key, challenge in self.captchaChallenges.items() if challenge.expiresAt <= now]
+        for key in expiredKeys:
+            del self.captchaChallenges[key]
 
     async def handleCaptchaAnswer(self, interaction: discord.Interaction, submittedCode: str) -> None:
-        if not self.isHomeGuild(interaction):
+        server = self.serverFor(interaction)
+        if server is None:
             return
         userId = interaction.user.id
-        challenge = self.captchaChallenges.get(userId)
+        challengeKey = (server.guildId, userId)
+        challenge = self.captchaChallenges.get(challengeKey)
         if challenge is None or challenge.expiresAt <= time.monotonic():
-            self.captchaChallenges.pop(userId, None)
+            self.captchaChallenges.pop(challengeKey, None)
             await interaction.response.send_message(
                 "⚠  Code expired. Press **Verify** for a new one.", ephemeral=True
             )
@@ -664,7 +703,7 @@ class HollowWardenBot(discord.Client):
         if not codesMatch(challenge.code, submittedCode):
             challenge.attemptsLeft -= 1
             if challenge.attemptsLeft <= 0:
-                del self.captchaChallenges[userId]
+                del self.captchaChallenges[challengeKey]
                 await interaction.response.send_message(
                     "⚠  Incorrect, no attempts left. Press **Verify** for a new code.", ephemeral=True
                 )
@@ -675,12 +714,12 @@ class HollowWardenBot(discord.Client):
             return
 
         # Delete before doing anything else so the same code can't be used twice.
-        del self.captchaChallenges[userId]
+        del self.captchaChallenges[challengeKey]
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            outcome = await self.verifier.completeCaptcha(userId)
+            outcome = await self.verifier.completeCaptcha(server.guildId, userId)
         except Exception:
-            log.exception("verification failed for %s", userId)
+            log.exception("verification failed for %s in %s", userId, server.name)
             await interaction.followup.send("⚠  Something went wrong. Tell a moderator.", ephemeral=True)
             return
         await interaction.followup.send(OUTCOME_MESSAGES[outcome], ephemeral=True)
@@ -690,17 +729,20 @@ class HollowWardenBot(discord.Client):
         if not self.isBotAdmin(interaction):
             await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
             return
+        server = self.serverFor(interaction)
+        assert server is not None  # isBotAdmin is False for unconfigured servers
         await interaction.response.defer(ephemeral=True, thinking=True)
-        log.info("configuration test run by %s", interaction.user.id)
+        log.info("configuration test run in %s by %s", server.name, interaction.user.id)
 
-        findings = self.collectSetupFindings()
+        # Only this server's checks: the report never mentions other servers.
+        findings = self.collectSetupFindings(server)
         try:
-            findings.extend(await self.collectLiveFindings())
+            findings.extend(await self.collectLiveFindings(server))
         except Exception:
             log.exception("a configuration check failed unexpectedly")
             findings.append(Finding(WARNING, "Some checks couldn't run. Check the bot's logs."))
 
-        title, description = formatReport(findings, self.describeSettings())
+        title, description = formatReport(findings, self.describeSettings(server))
         embed = discord.Embed(title=title, description=description, colour=ACCENT_COLOUR)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -710,24 +752,26 @@ class HollowWardenBot(discord.Client):
         if not self.isBotAdmin(interaction):
             await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
             return
+        server = self.serverFor(interaction)
+        assert server is not None
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         # One line, no Markdown tricks, so a note can't disguise itself as
         # extra log entries in the mod channel.
         cleanNote = discord.utils.escape_markdown(" ".join(note.split())) if note else None
         try:
-            outcome = await self.verifier.manualVerify(member.id, interaction.user.id, cleanNote)
+            outcome = await self.verifier.manualVerify(server.guildId, member.id, interaction.user.id, cleanNote)
         except UnsafeRoleError as error:
             await interaction.followup.send(f"⚠  {error}", ephemeral=True)
             return
         except Exception:
-            log.exception("manual verification of %s failed", member.id)
+            log.exception("manual verification of %s in %s failed", member.id, server.name)
             await interaction.followup.send("⚠  Couldn't verify them. Check the bot's logs.", ephemeral=True)
             return
 
         if outcome is Outcome.VERIFIED:
             # Any CAPTCHA they had open is now pointless.
-            self.captchaChallenges.pop(member.id, None)
+            self.captchaChallenges.pop((server.guildId, member.id), None)
             await interaction.followup.send(f"✓  Verified {member.mention}.", ephemeral=True)
         elif outcome is Outcome.ALREADY_VERIFIED:
             await interaction.followup.send(f"✓  {member.mention} is already verified.", ephemeral=True)
@@ -740,11 +784,13 @@ class HollowWardenBot(discord.Client):
         if not self.isBotAdmin(interaction):
             await interaction.response.send_message("⚠  Only bot admins can do that.", ephemeral=True)
             return
+        server = self.serverFor(interaction)
+        assert server is not None
         await interaction.response.defer()
         try:
-            handled = await self.verifier.resolveReview(userId, approve)
+            handled = await self.verifier.resolveReview(server.guildId, userId, approve)
         except Exception:
-            log.exception("could not apply review decision for %s", userId)
+            log.exception("could not apply review decision for %s in %s", userId, server.name)
             await interaction.followup.send("⚠  Couldn't apply that. Check the bot's logs.", ephemeral=True)
             return
         if not handled:
@@ -752,7 +798,9 @@ class HollowWardenBot(discord.Client):
             return
 
         decision = "✓  Approved" if approve else "⚠  Denied"
-        log.info("review for %s %s by %s", userId, "approved" if approve else "denied", interaction.user.id)
+        log.info(
+            "review for %s in %s %s by %s", userId, server.name, "approved" if approve else "denied", interaction.user.id
+        )
         message = interaction.message
         if message is not None:
             embed = message.embeds[0] if message.embeds else discord.Embed()

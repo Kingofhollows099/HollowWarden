@@ -218,6 +218,74 @@ server. It privately shows a report of problems, warnings and passed checks:
 Fix anything listed under **Problems**, then type `/verification-panel` in
 `#verify` to post the Verify button.
 
+## Multiple servers
+
+One bot can protect several servers. Each server has its own settings and
+its own separate data:
+
+```
+config/servers/friends/settings.toml    ← each server's settings (read-only to the bot)
+config/servers/gaming/settings.toml
+data volume: servers/<guild id>/hollowwarden.db   ← each server's own database
+```
+
+**What's per server:** verification method, flagged action, minimum account
+age, VPN flagging, IP retention, the Verified role, the mod channel and the
+admin roles. **What's shared:** the bot itself, and for web verification the
+website (`PUBLIC_BASE_URL`), the OAuth app (`DISCORD_CLIENT_ID`),
+`TRUSTED_PROXIES`, `CLIENT_IP_HEADER` and the VPN list. So all web-mode
+servers verify through the same site.
+
+**Servers are kept apart.** A member is only compared with other members of
+the same server for alt detection. A server's moderators never see anything
+from another server. Being a bot admin in one server grants nothing in
+another, and verifying in one server doesn't verify you in another. Two
+servers can't share a mod channel: the bot refuses to start if two settings
+files use the same one, and it refuses to post a server's reviews into a
+channel that belongs to a different server.
+
+**Adding a server:**
+
+1. Set it up as in steps 1–2 above: invite the bot, create its Verified role,
+   and give the bot's role the channel permissions.
+2. Create its settings:
+   ```bash
+   mkdir config/servers/gaming        # any name: letters, numbers, - and _
+   cp config/settings.example.toml config/servers/gaming/settings.toml
+   nano config/servers/gaming/settings.toml
+   ```
+3. Run `docker compose up -d`, then `/test-config` in that server. It only
+   reports on the server it's run in.
+
+The bot leaves any server that doesn't have a settings directory. Servers can
+only be added by editing these files on your machine, never from Discord, so
+a compromised Discord account can't add a server or change one's settings.
+
+**Moving from `.env` to settings files.** Your existing one-server setup in
+`.env` keeps working, and nothing needs to change. To add a second server:
+
+1. Create `config/servers/<name>/settings.toml` for your **existing** server,
+   copying the values from `.env` (`GUILD_ID` becomes `guild_id`, and so on;
+   `ADMIN_ROLE_IDS` becomes a list like `["123…", "456…"]`).
+2. Add the new server's directory the same way.
+3. Delete the server lines from `.env` (`GUILD_ID` down to
+   `IP_RETENTION_DAYS`). The bot refuses to start if both are set, so it's
+   never unclear which applies.
+4. If you used the bot **before** multi-server support, set
+   `LEGACY_DATA_GUILD_ID` in `.env` to your original server's `guild_id`. The
+   bot then moves its existing data (alt history, pending reviews) into that
+   server's directory. With only one server this happens automatically.
+5. Run `docker compose up -d`.
+
+The move from the single old database is careful: it happens in one step that
+either fully succeeds or changes nothing, and it never overwrites an existing
+server database.
+
+**Removing a server:** delete its settings directory and restart, and the bot
+leaves it. Its data directory stays, so nothing is lost by accident, but its IP
+records are still deleted on the normal schedule. Delete
+`servers/<guild id>/` from the data volume to remove the rest.
+
 ## Day to day
 
 - **Held for review:** a message appears in the mod channel explaining why,
@@ -229,7 +297,8 @@ Fix anything listed under **Problems**, then type `/verification-panel` in
   manual verification is posted to the mod log with the admin's name, and the
   admin is also named in Discord's audit log. If the person was waiting for
   review, that review closes.
-- **Changing who's a bot admin:** edit `ADMIN_ROLE_IDS` in `.env`, then run
+- **Changing who's a bot admin:** edit `ADMIN_ROLE_IDS` in `.env` (or
+  `admin_role_ids` in that server's `settings.toml`), then run
   `docker compose up -d`. Changes to *who holds* those roles take effect
   immediately, with no restart. Bot commands are visible to every member
   (non-admins get "Only bot admins can do that"). To hide them, go to **Server

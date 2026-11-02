@@ -19,6 +19,9 @@ services:
       - ip_hash_key
     volumes:
       - hollowwarden-data:/data
+      # Each server's settings, one directory per server. Read-only, so the
+      # bot can't change its own configuration even if it were compromised.
+      - ./config:/config:ro
     labels:
       # This image is built locally from your checkout and exists on no
       # registry, so auto-updaters can't update it correctly. Update with

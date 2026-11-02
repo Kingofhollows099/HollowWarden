@@ -14,6 +14,7 @@ from hollowwarden.verification import MemberState, Outcome, Verifier
 
 from .test_admin import OWNER_ID, makeInteraction
 from .test_flow import (  # noqa: F401 (storage and settings are pytest fixtures)
+    GUILD_ID,
     NEW_USER,
     OLD_USER,
     FakeGateway,
@@ -22,6 +23,7 @@ from .test_flow import (  # noqa: F401 (storage and settings are pytest fixtures
     settings,
     startFlow,
     storage,
+    withServerSettings,
 )
 
 MOD_CHANNEL_ID = 333333333333333333
@@ -56,10 +58,11 @@ class TestCommandSyncDenied:
         with pytest.raises(StartupError) as raised:
             await bot.setup_hook()
         message = str(raised.value)
-        assert "GUILD_ID 111111111111111111" in message
+        assert "guild_id 111111111111111111" in message
         assert "applications.commands" in message
-        # Raised "from None": no chained Discord traceback to wade through.
-        assert raised.value.__cause__ is None and raised.value.__suppress_context__
+        # No chained Discord traceback to wade through.
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None or raised.value.__suppress_context__
 
     def test_startupErrorExitsCleanlyWithoutTraceback(self, monkeypatch, caplog):
         async def failingMain():
@@ -94,32 +97,32 @@ class TestModChannelPosts:
     async def test_modLogForbiddenIsLoggedNotRaised(self, bot, caplog):
         bot.getModChannel = AsyncMock(return_value=modChannelRaising(forbidden()))
         with caplog.at_level(logging.ERROR):
-            await bot.postModLog("✓  someone verified")
+            await bot.postModLog(GUILD_ID, "✓  someone verified")
         assert any(
-            f"can't post in MOD_CHANNEL_ID {MOD_CHANNEL_ID}" in message and "Embed Links" in message
+            f"can't post in mod_channel_id {MOD_CHANNEL_ID}" in message and "Embed Links" in message
             for message in errorMessages(caplog)
         )
 
     @pytest.mark.parametrize("needsDecision", [True, False])
     async def test_reviewForbiddenReturnsFalse(self, bot, needsDecision):
         bot.getModChannel = AsyncMock(return_value=modChannelRaising(forbidden()))
-        assert await bot.postReview(OLD_USER, ["reason"], needsDecision=needsDecision) is False
+        assert await bot.postReview(GUILD_ID, OLD_USER, ["reason"], needsDecision=needsDecision) is False
 
     async def test_otherDiscordErrorsAlsoReturnFalse(self, bot, caplog):
         bot.getModChannel = AsyncMock(return_value=modChannelRaising(serverError()))
         with caplog.at_level(logging.ERROR):
-            assert await bot.postReview(OLD_USER, ["reason"], needsDecision=True) is False
+            assert await bot.postReview(GUILD_ID, OLD_USER, ["reason"], needsDecision=True) is False
         assert any("HTTP 500" in message for message in errorMessages(caplog))
 
     async def test_unreachableChannelReturnsFalse(self, bot):
         bot.getModChannel = AsyncMock(return_value=None)
-        assert await bot.postReview(OLD_USER, ["reason"], needsDecision=True) is False
+        assert await bot.postReview(GUILD_ID, OLD_USER, ["reason"], needsDecision=True) is False
 
     async def test_successfulPostReturnsTrue(self, bot):
         channel = MagicMock()
         channel.send = AsyncMock()
         bot.getModChannel = AsyncMock(return_value=channel)
-        assert await bot.postReview(OLD_USER, ["reason"], needsDecision=True) is True
+        assert await bot.postReview(GUILD_ID, OLD_USER, ["reason"], needsDecision=True) is True
         assert channel.send.await_args.kwargs["view"] is not None
 
 
@@ -129,15 +132,15 @@ class TestVerifierWhenModChannelFails:
         gateway.modChannelWorks = False
         verifier = Verifier(settings, storage, gateway)
 
-        assert await verifier.completeCaptcha(NEW_USER) is Outcome.UNAVAILABLE
-        assert not await storage.hasPendingReview(NEW_USER)
+        assert await verifier.completeCaptcha(GUILD_ID, NEW_USER) is Outcome.UNAVAILABLE
+        assert not await storage.hasPendingReview(GUILD_ID, NEW_USER)
         assert gateway.granted == []
 
         # Once the permission is fixed, a retry works normally instead of
         # being stuck answering "pending".
         gateway.modChannelWorks = True
-        assert await verifier.completeCaptcha(NEW_USER) is Outcome.PENDING_REVIEW
-        assert await storage.hasPendingReview(NEW_USER)
+        assert await verifier.completeCaptcha(GUILD_ID, NEW_USER) is Outcome.PENDING_REVIEW
+        assert await storage.hasPendingReview(GUILD_ID, NEW_USER)
         assert len(gateway.reviews) == 1
 
     async def test_allowModeStillVerifiesIfAlertFails(self, settings, storage):
@@ -145,8 +148,8 @@ class TestVerifierWhenModChannelFails:
 
         gateway = FakeGateway({NEW_USER: False})
         gateway.modChannelWorks = False
-        verifier = Verifier(replace(settings, flaggedAction="allow"), storage, gateway)
-        assert await verifier.completeCaptcha(NEW_USER) is Outcome.VERIFIED
+        verifier = Verifier(withServerSettings(settings, flaggedAction="allow"), storage, gateway)
+        assert await verifier.completeCaptcha(GUILD_ID, NEW_USER) is Outcome.VERIFIED
         assert gateway.granted == [NEW_USER]
 
 
@@ -160,12 +163,12 @@ async def realBotSite(aiohttp_client, settings, storage):
     bot = HollowWardenBot(settings, storage)
     members = {OLD_USER: False, NEW_USER: False}
 
-    async def getMemberState(userId):
+    async def getMemberState(guildId, userId):
         if userId not in members:
             return MemberState(isMember=False, hasVerifiedRole=False)
         return MemberState(isMember=True, hasVerifiedRole=members[userId])
 
-    async def grantVerifiedRole(userId, auditReason=None):
+    async def grantVerifiedRole(guildId, userId, auditReason=None):
         members[userId] = True
 
     bot.getMemberState = getMemberState
@@ -196,7 +199,7 @@ class TestWebFlowWhenModChannelFails:
         response = await finishFlow(realBotSite, state, nonce, "code1")
         assert response.status == 503
         assert "Please tell a moderator" in await response.text()
-        assert not await realBotSite.storage.hasPendingReview(NEW_USER)
+        assert not await realBotSite.storage.hasPendingReview(GUILD_ID, NEW_USER)
         assert realBotSite.members[NEW_USER] is False
 
 
@@ -206,9 +209,9 @@ class TestCheckSetup:
 
         guild, verifiedRole = makeFakeGuild(botModPermissions=botModPermissions)
         bot.get_guild = lambda guildId: guild
-        bot.getVerifiedRole = lambda: verifiedRole
+        bot.getVerifiedRole = lambda server: verifiedRole
         with caplog.at_level(logging.ERROR):
-            bot.checkSetup()
+            bot.checkSetup(bot.settings.servers[GUILD_ID])
         return errorMessages(caplog)
 
     def test_missingChannelPermissionsAreNamed(self, bot, caplog):
@@ -314,7 +317,7 @@ class TestReviewPostCheck:
     async def test_rejectedReviewIsAProblemWithDiscordsReason(self, bot, caplog):
         bot.getModChannel = AsyncMock(return_value=modChannelRaising(invalidEmojiError()))
         with caplog.at_level(logging.ERROR):
-            finding = await bot.checkReviewPost()
+            finding = await bot.checkReviewPost(bot.settings.servers[GUILD_ID])
         assert finding.level == "error"
         assert "Invalid emoji" in finding.text and "Verification unavailable" in finding.text
         assert any("code 50035" in message and "Invalid emoji" in message for message in errorMessages(caplog))
@@ -325,7 +328,7 @@ class TestReviewPostCheck:
         channel.send = AsyncMock(return_value=sentMessage)
         bot.getModChannel = AsyncMock(return_value=channel)
 
-        finding = await bot.checkReviewPost()
+        finding = await bot.checkReviewPost(bot.settings.servers[GUILD_ID])
 
         assert finding.level == "ok"
         sentMessage.delete.assert_awaited_once()
@@ -338,4 +341,4 @@ class TestReviewPostCheck:
         channel = MagicMock()
         channel.send = AsyncMock(return_value=sentMessage)
         bot.getModChannel = AsyncMock(return_value=channel)
-        assert (await bot.checkReviewPost()).level == "warning"
+        assert (await bot.checkReviewPost(bot.settings.servers[GUILD_ID])).level == "warning"

@@ -13,9 +13,9 @@ from pathlib import Path
 from aiohttp import web
 
 from .bot import HollowWardenBot, StartupError
-from .config import ConfigError, Settings, loadSettings
+from .config import DEFAULT_IP_RETENTION_DAYS, ConfigError, Settings, loadSettings
 from .oauth import DiscordOAuth
-from .storage import Storage
+from .storage import MigrationError, ServerStorage
 from .vpnlist import VpnChecker
 from .web import VerificationSite
 
@@ -24,18 +24,24 @@ log = logging.getLogger("hollowwarden")
 PURGE_INTERVAL_SECONDS = 3600
 
 
-async def purgeLoop(storage: Storage, settings: Settings) -> None:
-    ipRetentionSeconds = settings.web.ipRetentionDays * 86400 if settings.web else None
+async def purgeLoop(storage: ServerStorage, settings: Settings) -> None:
+    # Each server keeps IP records for its own retention period.
+    retentionByGuild = {guildId: server.ipRetentionDays * 86400 for guildId, server in settings.servers.items()}
     while True:
         try:
-            await storage.purgeExpired(ipRetentionSeconds)
+            await storage.purgeExpired(retentionByGuild, otherServersRetentionSeconds=DEFAULT_IP_RETENTION_DAYS * 86400)
         except Exception:
             log.exception("purge failed")
         await asyncio.sleep(PURGE_INTERVAL_SECONDS)
 
 
 async def run(settings: Settings) -> None:
-    storage = Storage(settings.databasePath)
+    storage = ServerStorage(
+        settings.dataDirectory,
+        list(settings.servers),
+        legacyDatabasePath=Path(settings.databasePath),
+        legacyGuildId=settings.legacyDataGuildId,
+    )
     await storage.open()
     bot = HollowWardenBot(settings, storage)
     oauth: DiscordOAuth | None = None
@@ -49,7 +55,9 @@ async def run(settings: Settings) -> None:
             await oauth.start()
             bot.oauth = oauth
             vpnChecker = None
-            if settings.web.vpnListUrls:
+            # One shared list; each server decides whether to act on a match.
+            vpnNeeded = any(server.verifyMethod == "web" and server.flagVpn for server in settings.servers.values())
+            if settings.web.vpnListUrls and vpnNeeded:
                 # Cached next to the database, on the only writable volume.
                 vpnChecker = VpnChecker(settings.web.vpnListUrls, Path(settings.databasePath).parent / "vpn-ranges.txt")
                 vpnChecker.loadCache()
@@ -63,7 +71,7 @@ async def run(settings: Settings) -> None:
             await web.TCPSite(webRunner, settings.web.listenHost, settings.web.listenPort).start()
             log.info("verification site listening on port %s", settings.web.listenPort)
         else:
-            log.info("CAPTCHA mode: no web server started")
+            log.info("no server uses web verification: no web server started")
 
         await bot.start(settings.botToken)
     finally:
@@ -106,7 +114,7 @@ def cli() -> None:
     except ConfigError as error:
         log.error("configuration error: %s", error)
         sys.exit(2)
-    except StartupError as error:
+    except (StartupError, MigrationError) as error:
         log.error("%s", error)
         sys.exit(3)
 

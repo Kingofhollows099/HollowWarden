@@ -30,7 +30,7 @@ from hollowwarden.web import VerificationSite
 
 from .test_admin import OWNER_ID, makeInteraction
 from .test_core import webEnviron
-from .test_flow import FakeGateway, FakeOAuth, settings, storage  # noqa: F401 (pytest fixtures)
+from .test_flow import GUILD_ID, FakeGateway, FakeOAuth, settings, storage  # noqa: F401 (pytest fixtures)
 
 MOD_CHANNEL_ID = 333333333333333333
 ALL_MOD_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True, embed_links=True)
@@ -85,8 +85,8 @@ def bot(settings, storage):
 def findingsFor(bot, **guildOptions):
     guild, verifiedRole = makeFakeGuild(**guildOptions)
     bot.get_guild = lambda guildId: guild
-    bot.getVerifiedRole = lambda: verifiedRole
-    return bot.collectSetupFindings()
+    bot.getVerifiedRole = lambda server: verifiedRole
+    return bot.collectSetupFindings(bot.settings.servers[GUILD_ID])
 
 
 def levelsContaining(findings, text):
@@ -121,15 +121,15 @@ class TestServerChecks:
         guild, verifiedRole = makeFakeGuild()
         guild.me.guild_permissions = discord.Permissions(administrator=True)
         bot.get_guild = lambda guildId: guild
-        bot.getVerifiedRole = lambda: verifiedRole
-        assert levelsContaining(bot.collectSetupFindings(), "has Administrator") == [WARNING]
+        bot.getVerifiedRole = lambda server: verifiedRole
+        assert levelsContaining(bot.collectSetupFindings(bot.settings.servers[GUILD_ID]), "has Administrator") == [WARNING]
 
     def test_startupLogsTheSameFindings(self, bot, caplog):
         guild, verifiedRole = makeFakeGuild(everyoneSeesMod=True)
         bot.get_guild = lambda guildId: guild
-        bot.getVerifiedRole = lambda: verifiedRole
+        bot.getVerifiedRole = lambda server: verifiedRole
         with caplog.at_level(logging.INFO):
-            bot.checkSetup()
+            bot.checkSetup(bot.settings.servers[GUILD_ID])
         logged = [(record.levelno, record.getMessage()) for record in caplog.records]
         assert any(level == logging.ERROR and "can see the mod channel" in message for level, message in logged)
         # Passed checks aren't logged at startup, only problems.
@@ -288,7 +288,7 @@ class TestSelfTestPage:
 
 class TestOtherChecks:
     async def test_databaseOk(self, storage):
-        assert (await checkDatabase(storage)).level == OK
+        assert (await checkDatabase(storage.forGuild(GUILD_ID))).level == OK
 
     async def test_databaseFailureIsAnError(self, tmp_path):
         closedStorage = Storage(str(tmp_path / "closed.db"))
@@ -334,7 +334,7 @@ class TestCommand:
         interaction = makeInteraction([], userId=OWNER_ID)
         interaction.response = SimpleNamespace(defer=AsyncMock())
         interaction.followup = SimpleNamespace(send=AsyncMock())
-        bot.collectSetupFindings = lambda: [Finding(ERROR, "role problem")]
+        bot.collectSetupFindings = lambda server: [Finding(ERROR, "role problem")]
         bot.collectLiveFindings = AsyncMock(return_value=[Finding(OK, "database fine")])
 
         await bot.handleTestConfig(interaction)
@@ -350,7 +350,7 @@ class TestCommand:
         interaction = makeInteraction([], userId=OWNER_ID)
         interaction.response = SimpleNamespace(defer=AsyncMock())
         interaction.followup = SimpleNamespace(send=AsyncMock())
-        bot.collectSetupFindings = lambda: []
+        bot.collectSetupFindings = lambda server: []
         bot.collectLiveFindings = AsyncMock(side_effect=RuntimeError("boom"))
         await bot.handleTestConfig(interaction)
         assert "couldn't run" in interaction.followup.send.await_args.kwargs["embed"].description

@@ -14,7 +14,17 @@ from hollowwarden.vpnlist import validate
 from hollowwarden.web import VerificationSite
 
 from .test_core import webEnviron
-from .test_flow import OLD_USER, FakeGateway, FakeOAuth, finishFlow, settings, startFlow, storage  # noqa: F401
+from .test_flow import (  # noqa: F401 (settings and storage are pytest fixtures)
+    GUILD_ID,
+    OLD_USER,
+    FakeGateway,
+    FakeOAuth,
+    finishFlow,
+    settings,
+    startFlow,
+    storage,
+    withServerSettings,
+)
 
 # 150 ranges in 185.x.0.0/24, enough to pass the minimum-size check.
 GOOD_LIST = "# known VPN ranges\n" + "\n".join(f"185.{index}.0.0/24" for index in range(150)) + "\n"
@@ -131,8 +141,11 @@ class TestConfig:
     def test_onByDefaultWithDefaultList(self, tmp_path):
         assert loadSettings(webEnviron(tmp_path)).web.vpnListUrls == DEFAULT_VPN_LIST_URLS
 
-    def test_canBeTurnedOff(self, tmp_path):
-        assert loadSettings(webEnviron(tmp_path, FLAG_VPN="false")).web.vpnListUrls == ()
+    def test_canBeTurnedOffPerServer(self, tmp_path):
+        settings = loadSettings(webEnviron(tmp_path, FLAG_VPN="false"))
+        assert settings.servers[GUILD_ID].flagVpn is False
+        # The list itself is shared, so its source is still configured.
+        assert settings.web.vpnListUrls == DEFAULT_VPN_LIST_URLS
 
     def test_customUrls(self, tmp_path):
         urls = "https://a.example/one.txt, https://b.example/two.txt"
@@ -151,15 +164,22 @@ class TestConfig:
 class TestDecision:
     async def test_vpnUserIsHeldForReview(self, settings, storage):
         gateway = FakeGateway({OLD_USER: False})
-        outcome = await Verifier(settings, storage, gateway).completeWeb(OLD_USER, "hashA", isVpn=True)
+        outcome = await Verifier(settings, storage, gateway).completeWeb(GUILD_ID, OLD_USER, "hashA", isVpn=True)
         assert outcome is Outcome.PENDING_REVIEW
         assert gateway.granted == []
         assert any("VPN" in reason for reason in gateway.reviews[0][1])
 
+    async def test_serverWithFlaggingOffLetsVpnUsersIn(self, settings, storage):
+        gateway = FakeGateway({OLD_USER: False})
+        verifier = Verifier(withServerSettings(settings, flagVpn=False), storage, gateway)
+        assert await verifier.completeWeb(GUILD_ID, OLD_USER, "hashA", isVpn=True) is Outcome.VERIFIED
+        assert gateway.reviews == []
+
     @pytest.mark.parametrize("isVpn", [False, None])
     async def test_nonVpnOrUncheckedIsVerified(self, settings, storage, isVpn):
         gateway = FakeGateway({OLD_USER: False})
-        assert await Verifier(settings, storage, gateway).completeWeb(OLD_USER, "hashA", isVpn=isVpn) is Outcome.VERIFIED
+        verifier = Verifier(settings, storage, gateway)
+        assert await verifier.completeWeb(GUILD_ID, OLD_USER, "hashA", isVpn=isVpn) is Outcome.VERIFIED
 
 
 class TestWebFlow:
