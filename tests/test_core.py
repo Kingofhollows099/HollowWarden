@@ -45,7 +45,7 @@ def webEnviron(tmp_path, **overrides):
 class TestConfig:
     def test_captchaModeNeedsNoWebSecrets(self, tmp_path):
         settings = loadSettings(baseEnviron(tmp_path))
-        assert settings.verifyMethod == "captcha"
+        assert settings.servers[111111111111111111].verifyMethod == "captcha"
         assert settings.web is None
         assert settings.botToken == "bot-token"
 
@@ -87,7 +87,7 @@ class TestConfig:
 
     def test_adminRolesParsed(self, tmp_path):
         settings = loadSettings(baseEnviron(tmp_path))
-        assert settings.adminRoleIds == {555555555555555555, 666666666666666666}
+        assert settings.servers[111111111111111111].adminRoleIds == {555555555555555555, 666666666666666666}
 
     @pytest.mark.parametrize(
         "adminRoleIds",

@@ -1,0 +1,49 @@
+# One server's settings. To add a server, make a directory for it under
+# config/servers/ (any name: letters, numbers, - and _) and copy this file
+# into it as settings.toml. For example:
+#
+#   mkdir config/servers/friends
+#   cp config/settings.example.toml config/servers/friends/settings.toml
+#
+# The bot reads these files at startup (restart it after a change), and can't
+# change them: the config folder is mounted read-only. Each server's data is
+# kept separately, in the data volume under servers/<guild_id>/.
+#
+# IDs come from Discord with Developer Mode on (User Settings → Advanced):
+# right-click the server, role or channel and choose Copy ID. Put them in
+# quotes, as below.
+
+# Shown in logs and in /test-config. Defaults to the directory's name.
+name = "Friends"
+
+# The server, the role that verified members get, and the private channel
+# where the bot posts verification logs and review requests.
+guild_id = "111111111111111111"
+verified_role_id = "222222222222222222"
+mod_channel_id = "333333333333333333"
+
+# Roles whose members can use /verify-member, /verification-panel,
+# /test-config and the Approve/Deny buttons in THIS server (the server owner
+# always can). Being an admin here grants nothing in any other server.
+admin_role_ids = ["555555555555555555"]
+
+# How people verify:
+#   "captcha"  image code inside Discord
+#   "web"      Discord login on your site, plus alt detection by hashed IP.
+#              Needs PUBLIC_BASE_URL and the other web settings in .env.
+verify_method = "captcha"
+
+# What happens to flagged members (account too new, same network as another
+# member of this server, or on a VPN):
+#   "review"   held until a moderator clicks Approve or Deny (recommended)
+#   "allow"    let in, with an alert to moderators
+flagged_action = "review"
+
+# Accounts younger than this many days are flagged. 0 turns the check off.
+min_account_age_days = 7
+
+# Web method only: flag members who connect through a known VPN.
+flag_vpn = true
+
+# Web method only: days to keep IP hashes before deleting them.
+ip_retention_days = 180

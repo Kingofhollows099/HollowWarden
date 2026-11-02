@@ -1,10 +1,11 @@
 # HollowWarden Terms of Service
 
-**Effective date:** October 22, 2026
+**Effective date:** November 2, 2026
 
-These terms cover your use of HollowWarden, the verification bot for a
-private Discord server, and its verification website. The bot is run by
-that server's owner (the **operator**). By clicking **Verify** or otherwise
+These terms cover your use of HollowWarden, the verification bot for the
+private Discord servers it's set up in, and its verification website. The
+bot is run by one person (the **operator**). Each server's admins and
+moderators make the decisions for their own server. By clicking **Verify** or otherwise
 using the bot, you agree to these terms and to the
 [Privacy Policy](PRIVACY.md).
 

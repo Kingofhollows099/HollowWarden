@@ -1,7 +1,8 @@
 """The verification decision, kept separate from Discord and the web server.
 
 Both verification methods end up here, so the rules (account age, alt
-matches, review or allow) live in exactly one place. Discord access goes
+matches, review or allow) live in exactly one place. Every call names the
+server it's for, and that server's own settings and data are used. Discord access goes
 through the small `DiscordGateway` interface, which lets the tests check the
 decision logic with a fake gateway instead of a real bot.
 """
@@ -14,8 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from .config import Settings
-from .storage import Storage
+from .config import ServerSettings, Settings
+from .storage import ServerStorage
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +49,13 @@ class DiscordGateway(Protocol):
     postReview reports whether the message was actually posted.
     """
 
-    async def getMemberState(self, userId: int) -> MemberState: ...
+    async def getMemberState(self, guildId: int, userId: int) -> MemberState: ...
 
-    async def grantVerifiedRole(self, userId: int, auditReason: str | None = None) -> None: ...
+    async def grantVerifiedRole(self, guildId: int, userId: int, auditReason: str | None = None) -> None: ...
 
-    async def postModLog(self, message: str) -> None: ...
+    async def postModLog(self, guildId: int, message: str) -> None: ...
 
-    async def postReview(self, userId: int, reasons: list[str], needsDecision: bool) -> bool: ...
+    async def postReview(self, guildId: int, userId: int, reasons: list[str], needsDecision: bool) -> bool: ...
 
 
 def accountCreatedAt(userId: int) -> float:
@@ -71,62 +72,76 @@ def describeAge(seconds: float) -> str:
 
 
 class Verifier:
-    def __init__(self, settings: Settings, storage: Storage, gateway: DiscordGateway) -> None:
+    def __init__(self, settings: Settings, storage: ServerStorage, gateway: DiscordGateway) -> None:
         self.settings = settings
         self.storage = storage
         self.gateway = gateway
 
-    async def completeCaptcha(self, userId: int) -> Outcome:
-        return await self._complete(userId, method="captcha", ipHash=None)
+    def serverSettings(self, guildId: int) -> ServerSettings:
+        server = self.settings.server(guildId)
+        if server is None:
+            # Callers only pass configured servers; this is a safety net.
+            raise ValueError(f"server {guildId} isn't configured")
+        return server
 
-    async def completeWeb(self, userId: int, ipHash: str, isVpn: bool | None = None) -> Outcome:
-        """isVpn is None when VPN detection is off or its list isn't loaded."""
-        return await self._complete(userId, method="web login", ipHash=ipHash, isVpn=isVpn)
+    async def completeCaptcha(self, guildId: int, userId: int) -> Outcome:
+        return await self._complete(guildId, userId, method="captcha", ipHash=None)
+
+    async def completeWeb(self, guildId: int, userId: int, ipHash: str, isVpn: bool | None = None) -> Outcome:
+        """isVpn is None when no VPN list is loaded yet."""
+        return await self._complete(guildId, userId, method="web login", ipHash=ipHash, isVpn=isVpn)
 
     async def _complete(
-        self, userId: int, method: str, ipHash: str | None, isVpn: bool | None = None, now: float | None = None
+        self,
+        guildId: int,
+        userId: int,
+        method: str,
+        ipHash: str | None,
+        isVpn: bool | None = None,
+        now: float | None = None,
     ) -> Outcome:
+        server = self.serverSettings(guildId)
         currentTime = time.time() if now is None else now
 
-        memberState = await self.gateway.getMemberState(userId)
+        memberState = await self.gateway.getMemberState(guildId, userId)
         if not memberState.isMember:
             return Outcome.NOT_MEMBER
         if memberState.hasVerifiedRole:
             return Outcome.ALREADY_VERIFIED
-        if await self.storage.hasPendingReview(userId):
+        if await self.storage.hasPendingReview(guildId, userId):
             return Outcome.PENDING_REVIEW
 
         reasons = []
 
         accountAge = currentTime - accountCreatedAt(userId)
-        minimumAge = self.settings.minAccountAgeDays * 86400
+        minimumAge = server.minAccountAgeDays * 86400
         if accountAge < minimumAge:
             reasons.append(
-                f"Account is only {describeAge(accountAge)} old (minimum is {self.settings.minAccountAgeDays} days)."
+                f"Account is only {describeAge(accountAge)} old (minimum is {server.minAccountAgeDays} days)."
             )
 
-        if isVpn:
+        if isVpn and server.flagVpn:
             # A VPN hides the network someone really connects from, which is
             # what alt detection relies on, so a moderator should take a look.
             reasons.append("Connected through a known VPN network, so the alt check can't see their real network.")
 
         if ipHash is not None:
-            matchedUserIds = await self.storage.recordIpAndFindMatches(userId, ipHash, now=currentTime)
+            matchedUserIds = await self.storage.recordIpAndFindMatches(guildId, userId, ipHash, now=currentTime)
             if matchedUserIds:
-                reasons.append(await self._describeMatches(matchedUserIds))
+                reasons.append(await self._describeMatches(guildId, matchedUserIds))
 
         if not reasons:
-            await self.gateway.grantVerifiedRole(userId)
-            await self.gateway.postModLog(f"✓  <@{userId}> (`{userId}`) verified by {method}.")
-            log.info("user %s verified by %s", userId, method)
+            await self.gateway.grantVerifiedRole(guildId, userId)
+            await self.gateway.postModLog(guildId, f"✓  <@{userId}> (`{userId}`) verified by {method}.")
+            log.info("user %s verified in server %s by %s", userId, guildId, method)
             return Outcome.VERIFIED
 
-        if self.settings.flaggedAction == "allow":
-            await self.gateway.grantVerifiedRole(userId)
+        if server.flaggedAction == "allow":
+            await self.gateway.grantVerifiedRole(guildId, userId)
             # The role is already granted, so a failed alert is only logged
             # (by the gateway). It doesn't change the outcome.
-            await self.gateway.postReview(userId, reasons, needsDecision=False)
-            log.info("user %s verified by %s with flags", userId, method)
+            await self.gateway.postReview(guildId, userId, reasons, needsDecision=False)
+            log.info("user %s verified in server %s by %s with flags", userId, guildId, method)
             return Outcome.VERIFIED
 
         # Post first, record second. The review message is the only way a
@@ -135,17 +150,21 @@ class Verifier:
         # see, and every retry would answer "pending". (A moderator clicking
         # in the moment between the two steps would just see "Already
         # handled" and could click again.)
-        if not await self.gateway.postReview(userId, reasons, needsDecision=True):
-            log.warning("user %s could not be held for review: the review message couldn't be posted", userId)
+        if not await self.gateway.postReview(guildId, userId, reasons, needsDecision=True):
+            log.warning(
+                "user %s in server %s could not be held for review: the review message couldn't be posted",
+                userId,
+                guildId,
+            )
             return Outcome.UNAVAILABLE
-        await self.storage.addPendingReview(userId, now=currentTime)
-        log.info("user %s held for moderator review", userId)
+        await self.storage.addPendingReview(guildId, userId, now=currentTime)
+        log.info("user %s in server %s held for moderator review", userId, guildId)
         return Outcome.PENDING_REVIEW
 
-    async def _describeMatches(self, matchedUserIds: list[int]) -> str:
+    async def _describeMatches(self, guildId: int, matchedUserIds: list[int]) -> str:
         descriptions = []
         for matchedUserId in matchedUserIds[:MAX_MATCHES_LISTED]:
-            matchedState = await self.gateway.getMemberState(matchedUserId)
+            matchedState = await self.gateway.getMemberState(guildId, matchedUserId)
             # "Not in server" covers both "left" and "banned". Checking for a
             # ban would need the Ban Members permission, which is far too
             # powerful to give this bot just for a label.
@@ -156,7 +175,7 @@ class Verifier:
             descriptions.append(f"and {extraCount} more")
         return "Verified from the same network as: " + ", ".join(descriptions) + "."
 
-    async def manualVerify(self, userId: int, adminId: int, note: str | None = None) -> Outcome:
+    async def manualVerify(self, guildId: int, userId: int, adminId: int, note: str | None = None) -> Outcome:
         """An admin vouches for someone directly, so none of the checks run.
 
         Every manual verification is posted to the mod log with the admin's
@@ -165,7 +184,8 @@ class Verifier:
         a compromised or careless admin account would use, so it should never
         happen silently.
         """
-        memberState = await self.gateway.getMemberState(userId)
+        self.serverSettings(guildId)
+        memberState = await self.gateway.getMemberState(guildId, userId)
         if not memberState.isMember:
             return Outcome.NOT_MEMBER
         if memberState.hasVerifiedRole:
@@ -173,26 +193,29 @@ class Verifier:
 
         # Discord's audit log names the bot as the one who added the role, so
         # the admin is recorded in the reason.
-        await self.gateway.grantVerifiedRole(userId, auditReason=f"Manually verified by admin {adminId}")
+        await self.gateway.grantVerifiedRole(guildId, userId, auditReason=f"Manually verified by admin {adminId}")
         # Cleared only after the role is granted, so a failure leaves any
         # pending review in place. Once cleared, that review's buttons answer
         # "Already handled".
-        await self.storage.popPendingReview(userId)
+        await self.storage.popPendingReview(guildId, userId)
         noteText = f" Note: {note}" if note else ""
-        await self.gateway.postModLog(f"✓  <@{userId}> (`{userId}`) manually verified by <@{adminId}>.{noteText}")
-        log.info("user %s manually verified by %s", userId, adminId)
+        await self.gateway.postModLog(
+            guildId, f"✓  <@{userId}> (`{userId}`) manually verified by <@{adminId}>.{noteText}"
+        )
+        log.info("user %s manually verified in server %s by %s", userId, guildId, adminId)
         return Outcome.VERIFIED
 
-    async def resolveReview(self, userId: int, approve: bool) -> bool:
+    async def resolveReview(self, guildId: int, userId: int, approve: bool) -> bool:
         """Apply a moderator decision. Returns False if it was already handled."""
-        if not await self.storage.popPendingReview(userId):
+        self.serverSettings(guildId)
+        if not await self.storage.popPendingReview(guildId, userId):
             return False
         if approve:
             try:
-                await self.gateway.grantVerifiedRole(userId)
+                await self.gateway.grantVerifiedRole(guildId, userId)
             except Exception:
                 # Put the review back so the decision can be retried rather
                 # than silently lost.
-                await self.storage.addPendingReview(userId)
+                await self.storage.addPendingReview(guildId, userId)
                 raise
         return True

@@ -1,9 +1,9 @@
 # HollowWarden Privacy Policy
 
-**Effective date:** October 23, 2026
+**Effective date:** November 2, 2026
 
 HollowWarden is a Discord bot that checks new members before they get access
-to a private Discord server. It's run by that server's owner (the
+to the private Discord servers it's set up in. It's run by one person (the
 **operator**) on the operator's own computer, not by a company. This policy
 explains what the bot collects, why, how long it's kept, and who can see it.
 
@@ -33,7 +33,7 @@ record is kept by Discord under Discord's rules.
 
 | Data | Why | How long it's kept |
 |---|---|---|
-| A **one-way hash of your IP address**, linked to your Discord ID | To spot alternate accounts, and banned members coming back, that verify from the same internet connection | Deleted automatically **180 days** after it was last used, unless the operator sets a shorter or longer period |
+| A **one-way hash of your IP address**, linked to your Discord ID | To spot alternate accounts, and banned members coming back, that verify from the same internet connection | Deleted automatically **180 days** after it was last used, unless the operator sets a shorter or longer period for that server |
 | Your **IP address**, briefly | To hash it, and to check whether it belongs to a known VPN (see below) | Only while your request is being handled. It's never written to disk or kept in memory afterwards. Retry limits use the hash, which is kept in memory for about 10 to 20 minutes. |
 | One **cookie** (`__Host-hw_nonce`) | Security: it makes sure the Discord login finishes in the same browser it started in | Up to 10 minutes. It's deleted as soon as you finish. |
 | Your **Discord ID** from the "Log in with Discord" step | To confirm the person logging in is the person who clicked Verify | Used once, as above |
@@ -71,6 +71,13 @@ it's not used for tracking or advertising.
 - Browser fingerprints, analytics or advertising trackers
 
 ## 3. Who can see your data
+
+**Each server is kept separate.** If HollowWarden runs in more than one
+server, each server's data is stored in its own separate database. You're
+only ever compared with other members of the *same* server, and nothing about
+you from one server (including that you verified there, or which network
+you used) is shown to another server's moderators. Verifying in one server
+doesn't verify you in another.
 
 - **The server's moderators and admins** can see the moderator channel. If
   you're held for review, they'll see why, for example "account is 2 days old"

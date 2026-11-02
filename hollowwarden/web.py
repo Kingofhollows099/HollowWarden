@@ -35,23 +35,26 @@ from .config import WebSettings
 from .netutil import hashIp, isTrustedProxy, resolveClientIp
 from .oauth import DiscordOAuth, OAuthError
 from .ratelimit import RateLimiter
-from .storage import Storage, sha256Hex
+from .storage import ServerStorage, sha256Hex
 from .verification import Outcome, Verifier
 from .vpnlist import VpnChecker
 
 log = logging.getLogger(__name__)
 
-TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+# Links and login states are "<guild id>.<secret>": the guild says which
+# server's database to look the secret up in.
+TOKEN_PATTERN = re.compile(r"^[0-9]{15,21}\.[A-Za-z0-9_-]{43}$")
 OAUTH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,128}$")
 # The __Host- prefix makes browsers refuse the cookie unless it's Secure,
 # has Path=/ and has no Domain, so a sibling subdomain can't overwrite it.
 NONCE_COOKIE_NAME = "__Host-hw_nonce"
 OAUTH_STATE_LIFETIME_SECONDS = 600
-IP_HASH_KEY = "hollowwarden.ipHash"
-IP_IS_PUBLIC_KEY = "hollowwarden.ipIsPublic"
-PEER_IS_TRUSTED_KEY = "hollowwarden.peerIsTrusted"
-CLOUDFLARE_IP_MISMATCH_KEY = "hollowwarden.cloudflareIpMismatch"
-IS_VPN_KEY = "hollowwarden.isVpn"
+# Values the client middleware works out once per request, for the handlers.
+IP_HASH_KEY = web.RequestKey("hollowwarden.ipHash", str)
+IP_IS_PUBLIC_KEY = web.RequestKey("hollowwarden.ipIsPublic", bool)
+PEER_IS_TRUSTED_KEY = web.RequestKey("hollowwarden.peerIsTrusted", bool)
+CLOUDFLARE_IP_MISMATCH_KEY = web.RequestKey("hollowwarden.cloudflareIpMismatch", bool)
+IS_VPN_KEY = web.RequestKey("hollowwarden.isVpn", object)
 
 # The Clipboard Cleaner theme: dark navy, flat, a 4px radius, one raspberry
 # accent kept for status. Custom property names match the design system's
@@ -141,7 +144,7 @@ class VerificationSite:
     def __init__(
         self,
         settings: WebSettings,
-        storage: Storage,
+        storage: ServerStorage,
         verifier: Verifier,
         oauth: DiscordOAuth,
         isBotReady: Callable[[], bool],
@@ -261,13 +264,14 @@ class VerificationSite:
         if not self.isBotReady():
             return renderPage(503, "Starting up", "The bot is starting up. Please try again in a minute.")
 
-        userId = await self.storage.consumeVerifyToken(token)
-        if userId is None:
+        tokenRecord = await self.storage.consumeVerifyToken(token)
+        if tokenRecord is None:
             return renderPage(
                 410, "Link expired", "This link has expired or was already used. Click Verify in Discord again."
             )
+        guildId, userId = tokenRecord
 
-        state, browserNonce = await self.storage.createOauthState(userId, OAUTH_STATE_LIFETIME_SECONDS)
+        state, browserNonce = await self.storage.createOauthState(guildId, userId, OAUTH_STATE_LIFETIME_SECONDS)
         response = web.Response(status=303, headers={"Location": self.oauth.authorizeUrl(state)})
         response.set_cookie(
             NONCE_COOKIE_NAME,
@@ -296,7 +300,7 @@ class VerificationSite:
             return self.finish(
                 renderPage(400, "Link expired", "This login took too long. Click Verify in Discord again.")
             )
-        expectedUserId, nonceHash = stateRecord
+        guildId, expectedUserId, nonceHash = stateRecord
 
         cookieNonce = request.cookies.get(NONCE_COOKIE_NAME, "")
         if not hmac.compare_digest(sha256Hex(cookieNonce), nonceHash):
@@ -329,7 +333,7 @@ class VerificationSite:
             )
 
         ipHash = request[IP_HASH_KEY]
-        outcome = await self.verifier.completeWeb(expectedUserId, ipHash, isVpn=request[IS_VPN_KEY])
+        outcome = await self.verifier.completeWeb(guildId, expectedUserId, ipHash, isVpn=request[IS_VPN_KEY])
         title, message, statusLine = OUTCOME_PAGES[outcome]
         httpStatus = 503 if outcome is Outcome.UNAVAILABLE else 200
         return self.finish(renderPage(httpStatus, title, message, statusLine))
