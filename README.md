@@ -120,7 +120,8 @@ sudo chmod 400 secrets/*
 **Back up `secrets/ip_hash_key` somewhere safe.** If it changes, every stored
 IP hash becomes meaningless and alt detection starts over from scratch. Keep
 it private as well: anyone holding both the key and the database could test
-guesses about which IP a member used.
+guesses about which IP a member used. **Don't keep backups of the key and the
+data volume in the same place,** so a single stolen backup never holds both.
 
 ### 4. Web mode: Nginx Proxy Manager
 
@@ -372,7 +373,7 @@ records are still deleted on the normal schedule. Delete
 
 | Risk | How HollowWarden handles it |
 |---|---|
-| Database leak exposes members' IPs | Raw IPs are never stored, only HMAC-SHA256 with a secret key. A plain hash would be reversible by hashing all ~4 billion IPv4 addresses; the key makes that impossible. Hashes are deleted after `IP_RETENTION_DAYS`, and SQLite `secure_delete` overwrites deleted rows. |
+| Database leak exposes members' IPs | Raw IPs are never stored. A plain hash would be reversible by hashing all ~4 billion IPv4 addresses, so two layers stop that. **A secret key:** with the database alone, the stored values reveal nothing. **A slow hash (scrypt, 32 MB and ~0.1 s per guess):** even with the key too, reversing everyone takes about 11 years of computing per CPU core instead of about 2 hours. The slow hash runs only after a successful Discord login, at most two at a time, so it can't be used to overload the server. Hashes are deleted after `ip_retention_days`, and SQLite `secure_delete` overwrites deleted rows. Keep backups of the key and the data volume in different places. |
 | Database leak exposes usable links | Verification tokens and OAuth states are stored only as SHA-256 hashes. They are single-use and expire within 10 minutes. |
 | Someone shares their verification link, or an alt uses a friend's link | Links appear only in a private (ephemeral) Discord message. Finishing one requires logging in with Discord *as that same account*. |
 | Login CSRF (tricking someone into completing a login the attacker started) | OAuth `state` is bound to the browser with a `__Host-` cookie that is Secure, HttpOnly and SameSite. It's single-use. |

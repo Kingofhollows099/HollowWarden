@@ -123,9 +123,14 @@ class Verifier:
     async def completeCaptcha(self, guildId: int, userId: int) -> Outcome:
         return await self._complete(guildId, userId, method="captcha", ipHash=None)
 
-    async def completeWeb(self, guildId: int, userId: int, ipHash: str, isVpn: bool | None = None) -> Outcome:
-        """isVpn is None when no VPN list is loaded yet."""
-        return await self._complete(guildId, userId, method="web login", ipHash=ipHash, isVpn=isVpn)
+    async def completeWeb(
+        self, guildId: int, userId: int, ipHash: str, isVpn: bool | None = None, legacyIpHash: str | None = None
+    ) -> Outcome:
+        """isVpn is None when no VPN list is loaded yet. legacyIpHash matches
+        records stored before the slow hash (see storage)."""
+        return await self._complete(
+            guildId, userId, method="web login", ipHash=ipHash, isVpn=isVpn, legacyIpHash=legacyIpHash
+        )
 
     async def _complete(
         self,
@@ -135,6 +140,7 @@ class Verifier:
         ipHash: str | None,
         isVpn: bool | None = None,
         now: float | None = None,
+        legacyIpHash: str | None = None,
     ) -> Outcome:
         server = self.serverSettings(guildId)
         currentTime = time.time() if now is None else now
@@ -162,7 +168,9 @@ class Verifier:
             reasons.append("Connected through a known VPN network, so the alt check can't see their real network.")
 
         if ipHash is not None:
-            matchedUserIds = await self.storage.recordIpAndFindMatches(guildId, userId, ipHash, now=currentTime)
+            matchedUserIds = await self.storage.recordIpAndFindMatches(
+                guildId, userId, ipHash, now=currentTime, legacyIpHash=legacyIpHash
+            )
             if matchedUserIds:
                 reasons.append(await self._describeMatches(guildId, matchedUserIds))
 

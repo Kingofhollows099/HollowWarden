@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable
 from aiohttp import web
 
 from .config import WebSettings
-from .netutil import hashIp, isTrustedProxy, resolveClientIp
+from .netutil import SlowIpHasher, hashIp, isTrustedProxy, resolveClientIp
 from .oauth import DiscordOAuth, OAuthError
 from .ratelimit import RateLimiter
 from .storage import ServerStorage, sha256Hex
@@ -50,7 +50,11 @@ OAUTH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,128}$")
 NONCE_COOKIE_NAME = "__Host-hw_nonce"
 OAUTH_STATE_LIFETIME_SECONDS = 600
 # Values the client middleware works out once per request, for the handlers.
+# The fast hash, for rate limiting and for matching records from before the
+# slow hash. The raw IP is only kept on the request object, which is gone
+# once the request has been answered.
 IP_HASH_KEY = web.RequestKey("hollowwarden.ipHash", str)
+CLIENT_IP_KEY = web.RequestKey("hollowwarden.clientIp", str)
 IP_IS_PUBLIC_KEY = web.RequestKey("hollowwarden.ipIsPublic", bool)
 PEER_IS_TRUSTED_KEY = web.RequestKey("hollowwarden.peerIsTrusted", bool)
 CLOUDFLARE_IP_MISMATCH_KEY = web.RequestKey("hollowwarden.cloudflareIpMismatch", bool)
@@ -156,6 +160,7 @@ class VerificationSite:
         self.oauth = oauth
         self.isBotReady = isBotReady
         self.vpnChecker = vpnChecker
+        self.slowHasher = SlowIpHasher(settings.ipHashKey)
         self.rateLimiter = RateLimiter(maxEvents=20, windowSeconds=600)
 
     def createApp(self) -> web.Application:
@@ -203,12 +208,15 @@ class VerificationSite:
                 "match your Nginx Proxy Manager setup"
             )
             return renderPage(400, "Connection problem", "Your connection couldn't be checked. Please tell a moderator.")
-        # From here on only the hash is used, rate limiting included, so the
-        # raw IP never outlives this request, not even in memory.
+        # The rate limiter keeps only the fast hash, so the raw IP never
+        # outlives this request, not even in memory. It uses the fast hash
+        # because it runs on every request: the slow one would let anyone burn
+        # the server's CPU and memory just by loading pages.
         ipHash = hashIp(self.settings.ipHashKey, clientIp)
         if not self.rateLimiter.allow(ipHash):
             return renderPage(429, "Slow down", "Too many attempts. Please wait a few minutes and try again.")
         request[IP_HASH_KEY] = ipHash
+        request[CLIENT_IP_KEY] = clientIp
         # Checked here, while the raw IP still exists. Only the yes/no answer
         # is kept for the rest of the request.
         request[IS_VPN_KEY] = self.vpnChecker.isVpn(clientIp) if self.vpnChecker is not None else None
@@ -332,8 +340,13 @@ class VerificationSite:
                 )
             )
 
-        ipHash = request[IP_HASH_KEY]
-        outcome = await self.verifier.completeWeb(guildId, expectedUserId, ipHash, isVpn=request[IS_VPN_KEY])
+        # The slow hash is only worked out here, once the Discord login has
+        # succeeded and been checked, so it can't be triggered by anyone
+        # who simply loads the site.
+        storedIpHash = await self.slowHasher.hash(request[CLIENT_IP_KEY])
+        outcome = await self.verifier.completeWeb(
+            guildId, expectedUserId, storedIpHash, isVpn=request[IS_VPN_KEY], legacyIpHash=request[IP_HASH_KEY]
+        )
         title, message, statusLine = OUTCOME_PAGES[outcome]
         httpStatus = 503 if outcome is Outcome.UNAVAILABLE else 200
         return self.finish(renderPage(httpStatus, title, message, statusLine))
