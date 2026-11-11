@@ -1,21 +1,49 @@
 """Client IP handling: finding the real address and hashing it.
 
-Raw IP addresses are never stored. Each one is passed through HMAC-SHA256
-with a secret key, and only that result is kept. The key matters because there
-are only about 4 billion IPv4 addresses: a plain SHA-256 of an IP can be
-reversed in minutes by hashing every possible address. Without the key, the
-HMAC values reveal nothing, yet two equal IPs still produce equal values,
-which is all alt detection needs.
+Raw IP addresses are never stored. There are only about 4 billion IPv4
+addresses, so any hash of one can be reversed by hashing every possible
+address and comparing. Two things stand in the way:
+
+- A secret key. Without it, a stored value reveals nothing, so a leaked
+  database or backup on its own is useless.
+- A deliberately slow hash (scrypt) for everything that's stored. With a
+  fast hash, someone who stole the key as well could try every IPv4 address
+  in about two hours on one CPU core. With scrypt, each guess costs about
+  0.1 seconds and 32 MB of memory, which turns that into about 11 years per
+  core, and the memory requirement blunts graphics cards. Nothing can stop
+  someone with the key from checking a single guess ("was this person on
+  this IP?"); this protects against reversing everything at once.
+
+A fast keyed hash (HMAC) is still used for the website's rate limiter, which
+runs on every request and is only ever held in memory. Making that slow
+would let anyone burn the server's CPU and memory just by loading pages.
+Equal IPs still give equal values with either hash, which is all alt
+detection needs.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import ipaddress
 from collections.abc import Iterable, Mapping
 
 IPV6_PREFIX_LENGTH = 64
+
+# Stored hashes start with this, which tells them apart from the HMAC values
+# stored before the slow hash was introduced.
+SLOW_HASH_PREFIX = "scrypt1:"
+# scrypt's cost settings: 2^15 rounds with block size 8 needs 32 MB of memory
+# per hash (128 x 8 x 2^15 bytes) and takes about 0.1 seconds. Changing them
+# changes every hash, so existing records would stop matching.
+SCRYPT_COST = 2**15
+SCRYPT_BLOCK_SIZE = 8
+SCRYPT_PARALLELISM = 1
+SCRYPT_MAX_MEMORY = 64 * 1024 * 1024
+# How many slow hashes may run at once. Each needs 32 MB, and the container
+# is limited to 256 MB, so a burst of logins must queue rather than pile up.
+MAX_CONCURRENT_SLOW_HASHES = 2
 
 
 def normalizeIp(rawIp: str) -> str:
@@ -36,7 +64,38 @@ def normalizeIp(rawIp: str) -> str:
 
 
 def hashIp(ipHashKey: bytes, rawIp: str) -> str:
+    """The fast keyed hash: for in-memory use (rate limiting), and for
+    matching records stored before the slow hash existed."""
     return hmac.new(ipHashKey, normalizeIp(rawIp).encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def hashIpSlow(ipHashKey: bytes, rawIp: str) -> str:
+    """The slow keyed hash used for everything stored. The secret key is the
+    salt, so the same IP always gives the same value (as alt detection needs)
+    but only with this key."""
+    digest = hashlib.scrypt(
+        normalizeIp(rawIp).encode("ascii"),
+        salt=ipHashKey,
+        n=SCRYPT_COST,
+        r=SCRYPT_BLOCK_SIZE,
+        p=SCRYPT_PARALLELISM,
+        maxmem=SCRYPT_MAX_MEMORY,
+        dklen=32,
+    )
+    return SLOW_HASH_PREFIX + digest.hex()
+
+
+class SlowIpHasher:
+    """Runs hashIpSlow off the event loop, a limited number at a time, so a
+    hash never stalls the bot and a burst of logins can't exhaust memory."""
+
+    def __init__(self, ipHashKey: bytes, maxConcurrent: int = MAX_CONCURRENT_SLOW_HASHES) -> None:
+        self._ipHashKey = ipHashKey
+        self._semaphore = asyncio.Semaphore(maxConcurrent)
+
+    async def hash(self, rawIp: str) -> str:
+        async with self._semaphore:
+            return await asyncio.to_thread(hashIpSlow, self._ipHashKey, rawIp)
 
 
 def isTrustedProxy(

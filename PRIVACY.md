@@ -1,6 +1,6 @@
 # HollowWarden Privacy Policy
 
-**Effective date:** November 2, 2026
+**Effective date:** November 7, 2026
 
 HollowWarden is a Discord bot that checks new members before they get access
 to the private Discord servers it's set up in. It's run by one person (the
@@ -41,10 +41,13 @@ record is kept by Discord under Discord's rules.
 | **Whether you connected through a known VPN** (yes or no) | A VPN hides which network you're on, so a moderator takes a quick look instead | Not stored by the bot. If you're held for review, the moderator message says so (see section 3). |
 
 **About the IP hash.** HollowWarden **never stores your IP address.** It
-stores a keyed hash (HMAC-SHA256 with a secret key), which can't be turned
-back into your IP address without that key. For IPv6, only the first half of
-the address (the /64 network prefix) is used. That's the part that usually
-identifies a household's connection rather than a single device.
+stores a one-way hash made with a secret key, which can't be turned back
+into your IP address without that key. The hash is deliberately slow and
+memory-hungry to compute (scrypt), so even someone who stole both the
+database and the key would face years of computing to work out everyone's
+addresses, rather than hours. For IPv6, only the first half of the address
+(the /64 network prefix) is used. That's the part that usually identifies a
+household's connection rather than a single device.
 
 **About the VPN check.** The bot compares your IP address against a public
 list of IP ranges that belong to VPN services. The list is downloaded to the

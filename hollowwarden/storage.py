@@ -313,18 +313,22 @@ class Storage:
     # Alt detection
 
     async def recordIpAndFindMatches(
-        self, guildId: int, userId: int, ipHash: str, now: float | None = None
+        self, guildId: int, userId: int, ipHash: str, now: float | None = None, legacyIpHash: str | None = None
     ) -> list[int]:
         """Store this member's IP hash and return other members of the same
-        server who share it. Other servers' records are never consulted."""
+        server who share it. Other servers' records are never consulted.
+
+        legacyIpHash is the same IP in the fast format used before the slow
+        hash, so members recorded back then are still matched until their
+        records expire. Only ipHash is stored."""
         currentTime = int(time.time() if now is None else now)
 
         def recordAndMatch() -> list[int]:
             with self.connection:
                 rows = self.connection.execute(
                     "SELECT DISTINCT user_id FROM ip_records "
-                    "WHERE guild_id = ? AND ip_hash = ? AND user_id != ? ORDER BY user_id",
-                    (guildId, ipHash, userId),
+                    "WHERE guild_id = ? AND ip_hash IN (?, ?) AND user_id != ? ORDER BY user_id",
+                    (guildId, ipHash, legacyIpHash or ipHash, userId),
                 ).fetchall()
                 self.connection.execute(
                     "INSERT INTO ip_records (guild_id, user_id, ip_hash, first_seen, last_seen) VALUES (?, ?, ?, ?, ?) "
@@ -642,8 +646,12 @@ class ServerStorage:
         routed = self._routeSecret(state)
         return await routed[0].consumeOauthState(routed[1], now=now) if routed else None
 
-    async def recordIpAndFindMatches(self, guildId: int, userId: int, ipHash: str, now: float | None = None) -> list[int]:
-        return await self.forGuild(guildId).recordIpAndFindMatches(guildId, userId, ipHash, now=now)
+    async def recordIpAndFindMatches(
+        self, guildId: int, userId: int, ipHash: str, now: float | None = None, legacyIpHash: str | None = None
+    ) -> list[int]:
+        return await self.forGuild(guildId).recordIpAndFindMatches(
+            guildId, userId, ipHash, now=now, legacyIpHash=legacyIpHash
+        )
 
     async def addPendingReview(self, guildId: int, userId: int, now: float | None = None) -> None:
         await self.forGuild(guildId).addPendingReview(guildId, userId, now=now)
