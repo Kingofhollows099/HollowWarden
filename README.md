@@ -204,7 +204,8 @@ Once it's running, a bot admin can type **`/test-config`** anywhere in the
 server. It privately shows a report of problems, warnings and passed checks:
 
 - **Roles:** the Verified role is safe and assignable, the admin roles exist,
-  and the bot doesn't have Administrator.
+  and the bot doesn't have Administrator or any other powerful permission it
+  doesn't need (Ban Members, Manage Server, Manage Channels and so on).
 - **Channels:** the bot can post in the mod channel, the mod channel is
   hidden from `@everyone` and from verified members, and which channels
   unverified members can see.

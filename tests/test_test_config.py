@@ -123,6 +123,47 @@ class TestServerChecks:
         bot.getVerifiedRole = lambda server: verifiedRole
         assert levelsContaining(bot.collectSetupFindings(bot.settings.servers[GUILD_ID]), "has Administrator") == [WARNING]
 
+    def test_unneededPowerfulPermissionsAreAWarning(self, bot):
+        guild, verifiedRole = makeFakeGuild()
+        guild.me.guild_permissions = discord.Permissions(
+            manage_roles=True, ban_members=True, manage_guild=True, send_messages=True
+        )
+        bot.get_guild = lambda guildId: guild
+        bot.getVerifiedRole = lambda server: verifiedRole
+        [finding] = [
+            finding
+            for finding in bot.collectSetupFindings(bot.settings.servers[GUILD_ID])
+            if "never uses" in finding.text
+        ]
+        assert finding.level == WARNING
+        assert "Ban Members" in finding.text and "Manage Server" in finding.text
+        # Manage Roles is needed and ordinary permissions are harmless.
+        assert "Manage Roles" not in finding.text and "Send" not in finding.text
+
+    def test_onlyManageRolesPasses(self, bot):
+        guild, verifiedRole = makeFakeGuild()
+        bot.get_guild = lambda guildId: guild
+        bot.getVerifiedRole = lambda server: verifiedRole
+        findings = bot.collectSetupFindings(bot.settings.servers[GUILD_ID])
+        assert levelsContaining(findings, "no powerful permissions beyond Manage Roles") == [OK]
+        assert levelsContaining(findings, "never uses") == []
+
+    def test_administratorDoesNotAlsoListEveryPermission(self, bot):
+        guild, verifiedRole = makeFakeGuild()
+        guild.me.guild_permissions = discord.Permissions.all()
+        bot.get_guild = lambda guildId: guild
+        bot.getVerifiedRole = lambda server: verifiedRole
+        findings = bot.collectSetupFindings(bot.settings.servers[GUILD_ID])
+        assert levelsContaining(findings, "has Administrator") == [WARNING]
+        assert levelsContaining(findings, "never uses") == []
+
+    def test_everyUnneededPermissionHasAReadableName(self):
+        from hollowwarden.bot import PERMISSION_DISPLAY_NAMES, UNNEEDED_BOT_PERMISSIONS
+
+        names = [name for name, isSet in UNNEEDED_BOT_PERMISSIONS if isSet]
+        assert "manage_roles" not in names and "administrator" not in names
+        assert set(names) <= set(PERMISSION_DISPLAY_NAMES)
+
     def test_startupLogsTheSameFindings(self, bot, caplog):
         guild, verifiedRole = makeFakeGuild(everyoneSeesMod=True)
         bot.get_guild = lambda guildId: guild

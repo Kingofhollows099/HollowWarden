@@ -73,6 +73,30 @@ DANGEROUS_PERMISSIONS = discord.Permissions(
     mention_everyone=True,
     view_audit_log=True,
 )
+# The bot itself needs Manage Roles, so it's the one dangerous permission it
+# may hold. Anything else on this list is power it never uses, which an
+# attacker would get if the bot token ever leaked. Administrator has its own
+# warning, so it isn't repeated here.
+UNNEEDED_BOT_PERMISSIONS = discord.Permissions(
+    DANGEROUS_PERMISSIONS.value & ~discord.Permissions(manage_roles=True, administrator=True).value
+)
+# The names Discord's server settings show, so the warning says exactly which
+# toggle to turn off.
+PERMISSION_DISPLAY_NAMES = {
+    "manage_guild": "Manage Server",
+    "manage_channels": "Manage Channels",
+    "manage_webhooks": "Manage Webhooks",
+    "manage_messages": "Manage Messages",
+    "manage_nicknames": "Manage Nicknames",
+    "manage_expressions": "Manage Expressions",
+    "manage_events": "Manage Events",
+    "manage_threads": "Manage Threads",
+    "kick_members": "Kick Members",
+    "ban_members": "Ban Members",
+    "moderate_members": "Timeout Members",
+    "mention_everyone": "Mention @everyone, @here, and All Roles",
+    "view_audit_log": "View Audit Log",
+}
 
 # Styling follows the Clipboard Cleaner theme: one raspberry accent on every
 # embed, and outcome messages that start with ✓ or ⚠ plus two spaces, so
@@ -280,6 +304,13 @@ def buildRaidAlert(summary: RaidSummary, disabled: bool = False) -> dict[str, ob
     return {"embed": embed, "view": view}
 
 
+def describeUnneededPermissions(permissions: discord.Permissions) -> list[str]:
+    """The powerful permissions the bot holds but never needs, by the names
+    Discord shows in server settings."""
+    excess = discord.Permissions(permissions.value & UNNEEDED_BOT_PERMISSIONS.value)
+    return [PERMISSION_DISPLAY_NAMES.get(name, name) for name, isSet in excess if isSet]
+
+
 class HollowWardenBot(discord.Client):
     def __init__(self, settings: Settings, storage: ServerStorage) -> None:
         intents = discord.Intents.none()
@@ -423,12 +454,27 @@ class HollowWardenBot(discord.Client):
             return [Finding(ERROR, f"The bot is not in guild_id {server.guildId}; invite it first.")]
         findings = []
 
-        if guild.me.guild_permissions.administrator:
+        botPermissions = guild.me.guild_permissions
+        if botPermissions.administrator:
             findings.append(
                 Finding(WARNING, "The bot has Administrator. Remove it; Manage Roles is all it needs.")
             )
         else:
             findings.append(Finding(OK, "The bot doesn't have Administrator."))
+            # Skipped when it has Administrator, which already covers all of
+            # these and would only repeat the same advice at length.
+            unneededNames = describeUnneededPermissions(botPermissions)
+            if unneededNames:
+                findings.append(
+                    Finding(
+                        WARNING,
+                        "The bot has permissions it never uses: "
+                        + ", ".join(unneededNames)
+                        + ". Remove them from the bot's roles; anyone holding a leaked bot token would get them.",
+                    )
+                )
+            else:
+                findings.append(Finding(OK, "The bot has no powerful permissions beyond Manage Roles."))
 
         try:
             verifiedRole = self.getVerifiedRole(server)
