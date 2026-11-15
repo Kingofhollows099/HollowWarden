@@ -319,9 +319,12 @@ class Storage:
         server who share it. Other servers' records are never consulted.
 
         legacyIpHash is the same IP in the fast format used before the slow
-        hash, so members recorded back then are still matched until their
-        records expire. Only ipHash is stored."""
+        hash, so members recorded back then are still matched. Only ipHash is
+        stored, and any records in the old format for this IP are upgraded to
+        ipHash on the spot (see _upgradeLegacyRecords)."""
         currentTime = int(time.time() if now is None else now)
+        if legacyIpHash == ipHash:
+            legacyIpHash = None
 
         def recordAndMatch() -> list[int]:
             with self.connection:
@@ -330,6 +333,8 @@ class Storage:
                     "WHERE guild_id = ? AND ip_hash IN (?, ?) AND user_id != ? ORDER BY user_id",
                     (guildId, ipHash, legacyIpHash or ipHash, userId),
                 ).fetchall()
+                if legacyIpHash is not None:
+                    self._upgradeLegacyRecords(guildId, legacyIpHash, ipHash)
                 self.connection.execute(
                     "INSERT INTO ip_records (guild_id, user_id, ip_hash, first_seen, last_seen) VALUES (?, ?, ?, ?, ?) "
                     "ON CONFLICT (guild_id, user_id, ip_hash) DO UPDATE SET last_seen = excluded.last_seen",
@@ -338,6 +343,35 @@ class Storage:
             return [int(row[0]) for row in rows]
 
         return await self._run(recordAndMatch)
+
+    def _upgradeLegacyRecords(self, guildId: int, legacyIpHash: str, ipHash: str) -> None:
+        """Rewrite this server's old-format records for one IP in the slow
+        format. Runs inside recordAndMatch's transaction, after the matches
+        have been read, so it never changes the verification decision.
+
+        Old records can't be converted in bulk: that would need every
+        member's IP, and the only way to get those back from the old hashes
+        is to reverse them, which is the attack the slow hash exists to stop.
+        Here the IP is known anyway, because its owner is verifying right
+        now, and a matching old hash proves the record is for the same IP.
+
+        first_seen and last_seen are kept as they were (merged, if a member
+        already has a record in both formats), so upgrading a record never
+        makes it live longer than it would have.
+        """
+        self.connection.execute(
+            "INSERT INTO ip_records (guild_id, user_id, ip_hash, first_seen, last_seen) "
+            "SELECT guild_id, user_id, ?, first_seen, last_seen FROM ip_records WHERE guild_id = ? AND ip_hash = ? "
+            "ON CONFLICT (guild_id, user_id, ip_hash) DO UPDATE SET "
+            "first_seen = min(ip_records.first_seen, excluded.first_seen), "
+            "last_seen = max(ip_records.last_seen, excluded.last_seen)",
+            (ipHash, guildId, legacyIpHash),
+        )
+        upgradedCount = self.connection.execute(
+            "DELETE FROM ip_records WHERE guild_id = ? AND ip_hash = ?", (guildId, legacyIpHash)
+        ).rowcount
+        if upgradedCount:
+            log.info("upgraded %s old-format IP record(s) in server %s to the slow hash", upgradedCount, guildId)
 
     # Moderator reviews
 

@@ -8,15 +8,19 @@ import pytest
 import hollowwarden.netutil as netutil
 from hollowwarden.netutil import SLOW_HASH_PREFIX, SlowIpHasher, hashIp, hashIpSlow
 
+from hollowwarden.verification import Outcome, Verifier
+
 from .test_flow import (  # noqa: F401 (settings, storage and webClient are pytest fixtures)
     GUILD_ID,
     OLD_USER,
     OTHER_OLD_USER,
+    FakeGateway,
     finishFlow,
     settings,
     startFlow,
     storage,
     webClient,
+    withServerSettings,
 )
 
 KEY = b"k" * 48
@@ -124,3 +128,108 @@ class TestWebsite:
         assert "moderator" in await response.text()
         [review] = webClient.gateway.reviews
         assert str(OLD_USER) in review[1][0]
+
+
+def ipRecords(storage):
+    return sorted(
+        storage.forGuild(GUILD_ID)
+        .connection.execute("SELECT user_id, ip_hash, first_seen, last_seen FROM ip_records")
+        .fetchall()
+    )
+
+
+THIRD_USER = OTHER_OLD_USER + 1
+HOME_IP = "203.0.113.10"
+OTHER_IP = "198.51.100.7"
+
+
+class TestUpgradingOldRecords:
+    """Old-format records are rewritten in the slow format when their IP
+    verifies again, since the IP is known at that moment."""
+
+    async def test_matchIsHeldAndTheOldRecordIsUpgraded(self, settings, storage):
+        key = settings.web.ipHashKey
+        await storage.recordIpAndFindMatches(GUILD_ID, OLD_USER, hashIp(key, HOME_IP), now=1000)
+        gateway = FakeGateway({OLD_USER: False, OTHER_OLD_USER: False})
+        verifier = Verifier(settings, storage, gateway)
+
+        outcome = await verifier.completeWeb(
+            GUILD_ID, OTHER_OLD_USER, hashIpSlow(key, HOME_IP), legacyIpHash=hashIp(key, HOME_IP)
+        )
+
+        # The old record still caught the alt, exactly as a new one would.
+        assert outcome is Outcome.PENDING_REVIEW
+        assert gateway.granted == []
+        assert str(OLD_USER) in gateway.reviews[0][1][0]
+        # ...and no longer exists in the old format. Its dates are kept, so
+        # the upgrade doesn't make it live any longer.
+        records = ipRecords(storage)
+        assert (OLD_USER, hashIpSlow(key, HOME_IP), 1000, 1000) in records
+        assert all(ipHash.startswith(SLOW_HASH_PREFIX) for _, ipHash, _, _ in records)
+
+    async def test_allowSettingLetsThemInWithAnAlertAndStillUpgrades(self, settings, storage):
+        key = settings.web.ipHashKey
+        await storage.recordIpAndFindMatches(GUILD_ID, OLD_USER, hashIp(key, HOME_IP), now=1000)
+        gateway = FakeGateway({OLD_USER: False, OTHER_OLD_USER: False})
+        verifier = Verifier(withServerSettings(settings, flaggedAction="allow"), storage, gateway)
+
+        outcome = await verifier.completeWeb(
+            GUILD_ID, OTHER_OLD_USER, hashIpSlow(key, HOME_IP), legacyIpHash=hashIp(key, HOME_IP)
+        )
+
+        assert outcome is Outcome.VERIFIED
+        assert gateway.reviews and gateway.reviews[0][2] is False  # an alert, not a decision
+        assert all(ipHash.startswith(SLOW_HASH_PREFIX) for _, ipHash, _, _ in ipRecords(storage))
+
+    async def test_aMatchedNewRecordIsLeftAlone(self, settings, storage):
+        key = settings.web.ipHashKey
+        await storage.recordIpAndFindMatches(GUILD_ID, OLD_USER, hashIpSlow(key, HOME_IP), now=1000)
+        matches = await storage.recordIpAndFindMatches(
+            GUILD_ID, OTHER_OLD_USER, hashIpSlow(key, HOME_IP), now=2000, legacyIpHash=hashIp(key, HOME_IP)
+        )
+        assert matches == [OLD_USER]
+        assert (OLD_USER, hashIpSlow(key, HOME_IP), 1000, 1000) in ipRecords(storage)
+
+    async def test_recordsInBothFormatsAreMerged(self, settings, storage):
+        key = settings.web.ipHashKey
+        # OLD_USER verified from this IP before and after the update.
+        await storage.recordIpAndFindMatches(GUILD_ID, OLD_USER, hashIp(key, HOME_IP), now=1000)
+        await storage.recordIpAndFindMatches(GUILD_ID, OLD_USER, hashIpSlow(key, HOME_IP), now=3000)
+        await storage.recordIpAndFindMatches(
+            GUILD_ID, OTHER_OLD_USER, hashIpSlow(key, HOME_IP), now=5000, legacyIpHash=hashIp(key, HOME_IP)
+        )
+        # One record, spanning both: the earliest first_seen and latest last_seen.
+        assert [record for record in ipRecords(storage) if record[0] == OLD_USER] == [
+            (OLD_USER, hashIpSlow(key, HOME_IP), 1000, 3000)
+        ]
+
+    async def test_theVerifyingMembersOwnOldRecordIsUpgraded(self, settings, storage):
+        key = settings.web.ipHashKey
+        await storage.recordIpAndFindMatches(GUILD_ID, OLD_USER, hashIp(key, HOME_IP), now=1000)
+        matches = await storage.recordIpAndFindMatches(
+            GUILD_ID, OLD_USER, hashIpSlow(key, HOME_IP), now=2000, legacyIpHash=hashIp(key, HOME_IP)
+        )
+        assert matches == []  # re-verifying from your own network isn't an alt
+        assert ipRecords(storage) == [(OLD_USER, hashIpSlow(key, HOME_IP), 1000, 2000)]
+
+    async def test_otherNetworksOldRecordsAreUntouched(self, settings, storage):
+        key = settings.web.ipHashKey
+        await storage.recordIpAndFindMatches(GUILD_ID, THIRD_USER, hashIp(key, OTHER_IP), now=1000)
+        await storage.recordIpAndFindMatches(
+            GUILD_ID, OLD_USER, hashIpSlow(key, HOME_IP), now=2000, legacyIpHash=hashIp(key, HOME_IP)
+        )
+        # Its IP hasn't been seen since the update, so it stays as it is and
+        # expires on its normal schedule.
+        assert (THIRD_USER, hashIp(key, OTHER_IP), 1000, 1000) in ipRecords(storage)
+
+    async def test_upgradedRecordsKeepMatching(self, settings, storage):
+        key = settings.web.ipHashKey
+        await storage.recordIpAndFindMatches(GUILD_ID, OLD_USER, hashIp(key, HOME_IP), now=1000)
+        await storage.recordIpAndFindMatches(
+            GUILD_ID, OTHER_OLD_USER, hashIpSlow(key, HOME_IP), now=2000, legacyIpHash=hashIp(key, HOME_IP)
+        )
+        # A third account from the same network is matched against both.
+        matches = await storage.recordIpAndFindMatches(
+            GUILD_ID, THIRD_USER, hashIpSlow(key, HOME_IP), now=3000, legacyIpHash=hashIp(key, HOME_IP)
+        )
+        assert matches == [OLD_USER, OTHER_OLD_USER]
